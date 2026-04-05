@@ -15,6 +15,8 @@ pub struct RuntimeConfig {
     pub websocket_host: String,
     /// Optional formal websocket port written into config for compatibility.
     pub websocket_port: u16,
+    /// Maximum number of queued Codex tasks.
+    pub queue_capacity: usize,
     /// Optional QQ executable override.
     pub qq_executable: Option<PathBuf>,
 }
@@ -26,7 +28,8 @@ impl Default for RuntimeConfig {
             webui_host: "127.0.0.1".to_string(),
             webui_port: 6099,
             websocket_host: "127.0.0.1".to_string(),
-            websocket_port: 3001,
+            websocket_port: 3012,
+            queue_capacity: 5,
             qq_executable: None,
         }
     }

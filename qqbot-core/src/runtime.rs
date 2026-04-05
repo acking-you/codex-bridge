@@ -38,6 +38,8 @@ pub struct RuntimePaths {
     pub cache_dir: PathBuf,
     /// Runtime process/state directory.
     pub run_dir: PathBuf,
+    /// Persistent state database path.
+    pub database_path: PathBuf,
     /// Environment file containing generated tokens.
     pub launcher_env: PathBuf,
     /// Base QQ installation directory.
@@ -79,6 +81,7 @@ impl RuntimePaths {
             config_dir: runtime_root.join("config"),
             logs_dir: runtime_root.join("logs"),
             cache_dir: runtime_root.join("cache"),
+            database_path: runtime_root.join("state.sqlite3"),
             launcher_env: run_dir.join("launcher.env"),
             run_dir,
             qq_base,
@@ -113,6 +116,9 @@ where
     fs::create_dir_all(&paths.logs_dir)?;
     fs::create_dir_all(&paths.cache_dir)?;
     fs::create_dir_all(&paths.run_dir)?;
+    if let Some(parent) = paths.database_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
 
     let mut env_values = read_env_file(&paths.launcher_env)?;
     if !env_values.contains_key("WEBUI_TOKEN") {
