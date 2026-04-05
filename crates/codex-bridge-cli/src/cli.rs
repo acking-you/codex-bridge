@@ -1,5 +1,7 @@
 //! Command-line argument types.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// Top-level CLI definition for the `codex-bridge` binary.
@@ -28,6 +30,18 @@ pub enum Commands {
     Cancel,
     /// Retry the latest failed or interrupted task for the active conversation.
     RetryLast,
+    /// Send one skill-driven reply into the currently active QQ conversation.
+    Reply {
+        /// Plain-text result body.
+        #[arg(long, conflicts_with_all = ["image", "file"])]
+        text: Option<String>,
+        /// Image artifact to send back.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["text", "file"])]
+        image: Option<PathBuf>,
+        /// Generic file artifact to send back.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["text", "image"])]
+        file: Option<PathBuf>,
+    },
     /// Send a private text message through the local bridge service.
     SendPrivate {
         /// Target QQ user identifier.

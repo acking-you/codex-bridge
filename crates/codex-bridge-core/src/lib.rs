@@ -15,6 +15,9 @@ pub mod message_router;
 /// Local HTTP/WebSocket API surface.
 pub mod api;
 
+/// Structured outbound QQ message definitions.
+pub mod outbound;
+
 /// Foreground QQ launcher helpers.
 pub mod launcher;
 
@@ -38,6 +41,9 @@ pub mod scheduler;
 
 /// Reply formatting helpers for QQ-facing user responses.
 pub mod reply_formatter;
+
+/// Active reply-context registry for skill-facing result delivery.
+pub mod reply_context;
 
 /// Command approval guard used for codex execution paths.
 pub mod approval_guard;

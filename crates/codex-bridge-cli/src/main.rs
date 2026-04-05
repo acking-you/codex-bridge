@@ -17,6 +17,9 @@ use codex_bridge_core::{
     codex_runtime::{CodexRuntime, CodexRuntimeConfig},
     config::RuntimeConfig,
     launcher, napcat, orchestrator,
+    outbound::ReplyRequest,
+    reply_context::load_active_reply_context,
+    runtime::RuntimePaths,
     service::ServiceState,
     state_store::StateStore,
 };
@@ -47,6 +50,11 @@ async fn main() -> Result<()> {
         Commands::RetryLast => post_local_json(&config, "/api/tasks/retry-last", json!({}))
             .await
             .map(|_| ()),
+        Commands::Reply {
+            text,
+            image,
+            file,
+        } => reply_command(&config, &project_root()?, text, image, file).await,
         Commands::SendPrivate {
             user_id,
             text,
@@ -83,7 +91,11 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     let prepared = launcher::prepare_launch(&project_root, &config).await?;
     let (command_tx, command_rx) = mpsc::channel(64);
     let (control_tx, control_rx) = mpsc::channel(64);
-    let state = ServiceState::with_control(command_tx, control_tx);
+    let state = ServiceState::with_control_and_reply_context(
+        command_tx,
+        control_tx,
+        prepared.paths.reply_context_file.clone(),
+    );
 
     let api_bind = config.api_bind.clone();
     let api_state = state.clone();
@@ -183,4 +195,24 @@ async fn post_local_json(config: &RuntimeConfig, path: &str, payload: Value) -> 
 
 fn local_url(config: &RuntimeConfig, path: &str) -> String {
     format!("http://{}{}", config.api_bind, path)
+}
+
+async fn reply_command(
+    config: &RuntimeConfig,
+    project_root: &Path,
+    text: Option<String>,
+    image: Option<PathBuf>,
+    file: Option<PathBuf>,
+) -> Result<()> {
+    let paths = RuntimePaths::new(project_root, Option::<PathBuf>::None);
+    let context = load_active_reply_context(&paths.reply_context_file)?;
+    let payload = ReplyRequest {
+        token: context.token,
+        text,
+        image,
+        file,
+    };
+    post_local_json(config, "/api/reply", serde_json::to_value(payload)?)
+        .await
+        .map(|_| ())
 }

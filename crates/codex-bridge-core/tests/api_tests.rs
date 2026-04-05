@@ -6,8 +6,10 @@ use axum::{
 };
 use codex_bridge_core::{
     api::build_router,
+    reply_context::ActiveReplyContext,
     service::{ServiceState, SessionSnapshot, SessionStatus, TaskSnapshot},
 };
+use tempfile::TempDir;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -222,4 +224,83 @@ async fn queue_route_rejects_control_command_without_running_conversation() {
         .await
         .expect("queue response");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn reply_route_sends_text_when_token_is_active() {
+    let state = ServiceState::for_tests();
+    let tempdir = TempDir::new().expect("tempdir");
+    let repo_root = tempdir.path().to_path_buf();
+    let artifacts_dir = repo_root.join(".run/artifacts");
+    std::fs::create_dir_all(&artifacts_dir).expect("create artifacts dir");
+    state
+        .activate_reply_context(ActiveReplyContext {
+            token: "token-1".to_string(),
+            conversation_key: "private:42".to_string(),
+            is_group: false,
+            reply_target_id: 42,
+            source_message_id: 9001,
+            source_sender_id: 42,
+            source_sender_name: "alice".to_string(),
+            repo_root,
+            artifacts_dir,
+        })
+        .await
+        .expect("activate reply context");
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reply")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"token-1","text":"hello"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("reply response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn reply_route_rejects_files_outside_artifacts() {
+    let state = ServiceState::for_tests();
+    let tempdir = TempDir::new().expect("tempdir");
+    let repo_root = tempdir.path().to_path_buf();
+    let artifacts_dir = repo_root.join(".run/artifacts");
+    let outside_file = repo_root.join("report.md");
+    std::fs::create_dir_all(&artifacts_dir).expect("create artifacts dir");
+    std::fs::write(&outside_file, "# report\n").expect("write outside file");
+    state
+        .activate_reply_context(ActiveReplyContext {
+            token: "token-2".to_string(),
+            conversation_key: "private:42".to_string(),
+            is_group: false,
+            reply_target_id: 42,
+            source_message_id: 9001,
+            source_sender_id: 42,
+            source_sender_name: "alice".to_string(),
+            repo_root,
+            artifacts_dir,
+        })
+        .await
+        .expect("activate reply context");
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reply")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    "{{\"token\":\"token-2\",\"file\":\"{}\"}}",
+                    outside_file.display()
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("reply response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

@@ -1,15 +1,21 @@
 //! Shared in-memory state for the foreground QQ bridge.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::{
     spawn,
-    sync::{broadcast, mpsc, oneshot, RwLock},
+    sync::{broadcast, mpsc, oneshot, Mutex, RwLock},
 };
+use uuid::Uuid;
 
-use crate::{events::NormalizedEvent, message_router::CommandRequest};
+use crate::{
+    events::NormalizedEvent,
+    message_router::CommandRequest,
+    outbound::OutboundMessage,
+    reply_context::{ActiveReplyContext, ReplyRegistry},
+};
 
 /// Current session lifecycle state exposed by the local API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +122,22 @@ pub enum ServiceCommand {
         /// Response channel for completion.
         respond_to: oneshot::Sender<Result<SendMessageReceipt>>,
     },
+    /// Send a structured outbound message assembled by the reply API.
+    SendOutbound {
+        /// Structured outbound transport payload.
+        message: OutboundMessage,
+        /// Response channel for completion.
+        respond_to: oneshot::Sender<Result<SendMessageReceipt>>,
+    },
+    /// Apply an emoji reaction to one QQ message.
+    SetMessageReaction {
+        /// Source QQ message identifier.
+        message_id: i64,
+        /// Emoji identifier recognized by NapCat.
+        emoji_id: String,
+        /// Response channel for completion.
+        respond_to: oneshot::Sender<Result<()>>,
+    },
     /// Route an orchestrator control command.
     Control {
         /// Payload for a local control command.
@@ -132,6 +154,7 @@ struct ServiceInner {
     events_tx: broadcast::Sender<NormalizedEvent>,
     command_tx: mpsc::Sender<ServiceCommand>,
     control_tx: mpsc::Sender<ServiceCommand>,
+    reply_registry: Mutex<ReplyRegistry>,
 }
 
 /// Cloneable handle shared across the API layer and runtime worker.
@@ -162,6 +185,16 @@ impl ServiceState {
         command_tx: mpsc::Sender<ServiceCommand>,
         control_tx: mpsc::Sender<ServiceCommand>,
     ) -> Self {
+        Self::with_control_and_reply_context(command_tx, control_tx, test_reply_context_file())
+    }
+
+    /// Build a service state with a custom control channel and reply-context
+    /// file.
+    pub fn with_control_and_reply_context(
+        command_tx: mpsc::Sender<ServiceCommand>,
+        control_tx: mpsc::Sender<ServiceCommand>,
+        reply_context_file: PathBuf,
+    ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(ServiceInner {
@@ -172,6 +205,7 @@ impl ServiceState {
                 events_tx,
                 command_tx,
                 control_tx,
+                reply_registry: Mutex::new(ReplyRegistry::new(reply_context_file)),
             }),
         }
     }
@@ -199,6 +233,19 @@ impl ServiceState {
                         let _ = respond_to.send(Ok(SendMessageReceipt {
                             message_id: group_id.saturating_add(text.len() as i64),
                         }));
+                    },
+                    ServiceCommand::SendOutbound {
+                        message,
+                        respond_to,
+                    } => {
+                        let _ = respond_to.send(Ok(SendMessageReceipt {
+                            message_id: 10_000 + message.segments.len() as i64,
+                        }));
+                    },
+                    ServiceCommand::SetMessageReaction {
+                        respond_to, ..
+                    } => {
+                        let _ = respond_to.send(Ok(()));
                     },
                     ServiceCommand::Control {
                         command: _,
@@ -259,6 +306,24 @@ impl ServiceState {
         self.inner.events_tx.subscribe()
     }
 
+    /// Activate the reply context for the currently running task.
+    pub async fn activate_reply_context(&self, context: ActiveReplyContext) -> Result<()> {
+        let mut registry = self.inner.reply_registry.lock().await;
+        registry.activate(context)
+    }
+
+    /// Revoke the reply context once a task finishes.
+    pub async fn deactivate_reply_context(&self) -> Result<()> {
+        let mut registry = self.inner.reply_registry.lock().await;
+        registry.deactivate()
+    }
+
+    /// Resolve an active reply token into its current context.
+    pub async fn reply_context(&self, token: &str) -> Result<ActiveReplyContext> {
+        let registry = self.inner.reply_registry.lock().await;
+        registry.resolve(token)
+    }
+
     /// Dispatch a private-message send request to the bridge worker.
     pub async fn send_private_message(
         &self,
@@ -301,6 +366,42 @@ impl ServiceState {
             .map_err(|_| anyhow!("bridge worker dropped the response"))?
     }
 
+    /// Dispatch a structured outbound message send request.
+    pub async fn send_outbound_message(
+        &self,
+        message: OutboundMessage,
+    ) -> Result<SendMessageReceipt> {
+        let (respond_to, response_rx) = oneshot::channel();
+        self.inner
+            .command_tx
+            .send(ServiceCommand::SendOutbound {
+                message,
+                respond_to,
+            })
+            .await
+            .map_err(|_| anyhow!("bridge worker is not available"))?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("bridge worker dropped the response"))?
+    }
+
+    /// Dispatch one emoji reaction request to the bridge worker.
+    pub async fn set_message_reaction(&self, message_id: i64, emoji_id: String) -> Result<()> {
+        let (respond_to, response_rx) = oneshot::channel();
+        self.inner
+            .command_tx
+            .send(ServiceCommand::SetMessageReaction {
+                message_id,
+                emoji_id,
+                respond_to,
+            })
+            .await
+            .map_err(|_| anyhow!("bridge worker is not available"))?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("bridge worker dropped the response"))?
+    }
+
     /// Dispatch a control command to the orchestrator runtime.
     pub async fn send_control_command(&self, command: CommandRequest) -> Result<()> {
         self.inner
@@ -312,4 +413,8 @@ impl ServiceState {
             .map_err(|_| anyhow!("orchestrator is not available"))?;
         Ok(())
     }
+}
+
+fn test_reply_context_file() -> PathBuf {
+    std::env::temp_dir().join(format!("codex-bridge-reply-context-{}.json", Uuid::new_v4()))
 }

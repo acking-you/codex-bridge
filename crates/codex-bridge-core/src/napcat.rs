@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::{
     config::RuntimeConfig,
     events::NormalizedEvent,
+    outbound::{OutboundMessage, OutboundSegment, OutboundTarget},
     runtime::RuntimeTokens,
     service::{
         FriendProfile, GroupProfile, SendMessageReceipt, ServiceCommand, ServiceState,
@@ -63,6 +64,44 @@ pub fn build_action_frame(action: &str, params: Value, echo: &str) -> Value {
         "action": action,
         "params": params,
         "echo": echo,
+    })
+}
+
+/// Build the formal OneBot action and params for one structured outbound
+/// message.
+pub fn build_outbound_action(message: &OutboundMessage) -> (&'static str, Value) {
+    let payload = Value::Array(
+        message
+            .segments
+            .iter()
+            .map(build_outbound_segment)
+            .collect::<Vec<_>>(),
+    );
+
+    match message.target {
+        OutboundTarget::Private(user_id) => (
+            "send_private_msg",
+            json!({
+                "user_id": user_id.to_string(),
+                "message": payload,
+            }),
+        ),
+        OutboundTarget::Group(group_id) => (
+            "send_group_msg",
+            json!({
+                "group_id": group_id.to_string(),
+                "message": payload,
+            }),
+        ),
+    }
+}
+
+/// Build `set_msg_emoji_like` params for one source message.
+pub fn build_set_msg_emoji_like_params(message_id: i64, emoji_id: &str) -> Value {
+    json!({
+        "message_id": message_id.to_string(),
+        "emoji_id": emoji_id,
+        "set": true,
     })
 }
 
@@ -184,6 +223,19 @@ pub async fn run_bridge_loop(
                             respond_to,
                         } => {
                             let _ = respond_to.send(client.send_group_message(group_id, text).await);
+                        },
+                        ServiceCommand::SendOutbound {
+                            message,
+                            respond_to,
+                        } => {
+                            let _ = respond_to.send(client.send_outbound_message(message).await);
+                        },
+                        ServiceCommand::SetMessageReaction {
+                            message_id,
+                            emoji_id,
+                            respond_to,
+                        } => {
+                            let _ = respond_to.send(client.set_message_reaction(message_id, emoji_id).await);
                         },
                         ServiceCommand::Control { .. } => {},
                     },
@@ -364,6 +416,24 @@ impl NapCatClient {
         })
     }
 
+    async fn send_outbound_message(&self, message: OutboundMessage) -> Result<SendMessageReceipt> {
+        let (action, params) = build_outbound_action(&message);
+        let raw: RawSendReceipt = self.call_action(action, params).await?;
+        Ok(SendMessageReceipt {
+            message_id: parse_i64_value(&raw.message_id)?,
+        })
+    }
+
+    async fn set_message_reaction(&self, message_id: i64, emoji_id: String) -> Result<()> {
+        let _: Value = self
+            .call_action(
+                "set_msg_emoji_like",
+                build_set_msg_emoji_like_params(message_id, emoji_id.as_str()),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn call_action<T>(&self, action: &str, params: Value) -> Result<T>
     where
         T: DeserializeOwned,
@@ -482,4 +552,51 @@ struct RawGroupProfile {
 #[derive(Debug, Deserialize)]
 struct RawSendReceipt {
     message_id: Value,
+}
+
+fn build_outbound_segment(segment: &OutboundSegment) -> Value {
+    match segment {
+        OutboundSegment::Reply {
+            message_id,
+        } => json!({
+            "type": "reply",
+            "data": {
+                "id": message_id.to_string(),
+            },
+        }),
+        OutboundSegment::At {
+            user_id,
+        } => json!({
+            "type": "at",
+            "data": {
+                "qq": user_id.to_string(),
+            },
+        }),
+        OutboundSegment::Text {
+            text,
+        } => json!({
+            "type": "text",
+            "data": {
+                "text": text,
+            },
+        }),
+        OutboundSegment::Image {
+            path,
+        } => json!({
+            "type": "image",
+            "data": {
+                "file": path.display().to_string(),
+            },
+        }),
+        OutboundSegment::File {
+            path,
+            name,
+        } => json!({
+            "type": "file",
+            "data": {
+                "file": path.display().to_string(),
+                "name": name,
+            },
+        }),
+    }
 }

@@ -16,6 +16,7 @@ use tracing::debug;
 
 use crate::{
     message_router::{CommandRequest, ControlCommand},
+    outbound::{build_outbound_message, ReplyRequest},
     service::{SendMessageReceipt, ServiceState, TaskSnapshot},
 };
 
@@ -30,6 +31,7 @@ pub fn build_router(state: ServiceState) -> Router {
         .route("/api/queue", get(queue_handler))
         .route("/api/tasks/cancel", post(cancel_handler))
         .route("/api/tasks/retry-last", post(retry_last_handler))
+        .route("/api/reply", post(reply_handler))
         .route("/api/events/ws", get(events_ws_handler))
         .route("/api/messages/private", post(send_private_handler))
         .route("/api/messages/group", post(send_group_handler))
@@ -227,6 +229,28 @@ async fn retry_last_handler(
     Ok(Json(TextResponse {
         status: "ok",
         text: "retry command sent".to_string(),
+    }))
+}
+
+async fn reply_handler(
+    State(state): State<ServiceState>,
+    Json(payload): Json<ReplyRequest>,
+) -> Result<Json<SendMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let context = state
+        .reply_context(payload.token.as_str())
+        .await
+        .map_err(|error| bad_request(error.to_string().as_str()))?;
+    let reply_payload = payload
+        .into_payload(&context)
+        .map_err(|error| bad_request(error.to_string().as_str()))?;
+    let outbound = build_outbound_message(&context, reply_payload);
+    let receipt = state
+        .send_outbound_message(outbound)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(SendMessageResponse {
+        status: "ok",
+        receipt,
     }))
 }
 
