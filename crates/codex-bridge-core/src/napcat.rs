@@ -15,6 +15,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
 };
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
@@ -216,10 +217,23 @@ impl NapCatClient {
         tokens: &RuntimeTokens,
     ) -> Result<(Self, mpsc::Receiver<NormalizedEvent>)> {
         let request = build_websocket_request(config, tokens)?;
+        let ws_url = format!("ws://{}:{}/", config.websocket_host, config.websocket_port);
+        let mut attempt = 0_u64;
         let stream = loop {
             match connect_async(request.clone()).await {
                 Ok((stream, _)) => break stream,
-                Err(_) => sleep(Duration::from_secs(1)).await,
+                Err(error) => {
+                    attempt += 1;
+                    if attempt == 1 || attempt.is_multiple_of(10) {
+                        warn!(
+                            attempt,
+                            websocket = %ws_url,
+                            error = %error,
+                            "waiting for formal OneBot websocket"
+                        );
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                },
             }
         };
 

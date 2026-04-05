@@ -1,7 +1,10 @@
 //! CLI smoke tests.
 
 use clap::Parser;
-use codex_bridge_cli::cli::{Cli, Commands};
+use codex_bridge_cli::{
+    cli::{Cli, Commands},
+    task_exit::background_task_exit_error,
+};
 
 #[test]
 fn parse_run_command() {
@@ -31,4 +34,22 @@ fn parse_cancel_command() {
 fn parse_retry_last_command() {
     let cli = Cli::try_parse_from(["codex-bridge", "retry-last"]).expect("parse retry-last");
     assert!(matches!(cli.command, Commands::RetryLast));
+}
+
+#[test]
+fn background_task_exit_error_rejects_unexpected_success() {
+    let error =
+        background_task_exit_error("bridge runtime", Ok(())).expect_err("unexpected success");
+    assert!(error
+        .to_string()
+        .contains("bridge runtime stopped unexpectedly"));
+}
+
+#[test]
+fn background_task_exit_error_wraps_component_context() {
+    let error = background_task_exit_error("bridge runtime", Err(anyhow::anyhow!("token验证失败")))
+        .expect_err("bridge failure should surface");
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("bridge runtime stopped"));
+    assert!(rendered.contains("token验证失败"));
 }

@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use codex_bridge_cli::cli::{Cli, Commands};
+use codex_bridge_cli::{
+    cli::{Cli, Commands},
+    task_exit::background_task_exit_error,
+};
 use codex_bridge_core::{
     api,
     codex_runtime::{CodexRuntime, CodexRuntimeConfig},
@@ -93,12 +96,8 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     let bridge_state = state.clone();
     let bridge_config = config.clone();
     let bridge_tokens = prepared.tokens.clone();
-    tokio::spawn(async move {
-        if let Err(error) =
-            napcat::run_bridge_loop(bridge_config, bridge_tokens, bridge_state, command_rx).await
-        {
-            eprintln!("bridge runtime stopped: {error:#}");
-        }
+    let bridge_task = tokio::spawn(async move {
+        napcat::run_bridge_loop(bridge_config, bridge_tokens, bridge_state, command_rx).await
     });
 
     let codex_state = state.clone();
@@ -111,15 +110,28 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         .await?,
     );
     let queue_capacity = config.queue_capacity;
-    tokio::spawn(async move {
+    let orchestrator_task = tokio::spawn(async move {
         if let Err(error) =
             orchestrator::run(codex_state, control_rx, codex, store, queue_capacity).await
         {
             eprintln!("orchestrator stopped: {error:#}");
         }
     });
+    let launcher_task = launcher::launch_qq_foreground(&prepared, config.api_bind.as_str());
+    tokio::pin!(launcher_task);
 
-    launcher::launch_qq_foreground(&prepared, config.api_bind.as_str()).await
+    let result = tokio::select! {
+        result = &mut launcher_task => result,
+        result = bridge_task => {
+            background_task_exit_error(
+                "bridge runtime",
+                result.map_err(anyhow::Error::from)?,
+            )
+        }
+    };
+
+    orchestrator_task.abort();
+    result
 }
 
 fn project_root() -> Result<PathBuf> {

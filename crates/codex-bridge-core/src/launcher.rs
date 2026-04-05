@@ -80,6 +80,7 @@ pub async fn launch_qq_foreground(prepared: &PreparedLaunch, api_bind: &str) -> 
     child
         .args(&command[1..])
         .current_dir(&prepared.paths.qq_base)
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .envs(build_launch_env(&prepared.paths, prepared.tokens.webui_token.as_str()));
