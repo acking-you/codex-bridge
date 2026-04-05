@@ -13,13 +13,26 @@ pub enum ControlCommand {
     /// Return command help and trigger rules.
     Help,
     /// Return current bot status.
-    Status,
+    Status {
+        /// Optional explicit task identifier for admin inspection.
+        task_id: Option<String>,
+    },
     /// Return current queue status.
     Queue,
     /// Cancel current or specified tasks.
     Cancel,
     /// Retry latest failed task.
     RetryLast,
+    /// Approve a pending task by task identifier.
+    Approve {
+        /// Stable task identifier.
+        task_id: String,
+    },
+    /// Deny a pending task by task identifier.
+    Deny {
+        /// Stable task identifier.
+        task_id: String,
+    },
 }
 
 /// Request object carrying metadata for task execution.
@@ -218,12 +231,21 @@ impl MessageRouter {
 }
 
 fn parse_command(text: &str) -> Option<ControlCommand> {
-    match text.split_whitespace().next() {
+    let mut parts = text.split_whitespace();
+    match parts.next() {
         Some("/help") => Some(ControlCommand::Help),
-        Some("/status") => Some(ControlCommand::Status),
+        Some("/status") => Some(ControlCommand::Status {
+            task_id: parts.next().map(ToString::to_string),
+        }),
         Some("/queue") => Some(ControlCommand::Queue),
         Some("/cancel") => Some(ControlCommand::Cancel),
         Some("/retry_last") => Some(ControlCommand::RetryLast),
+        Some("/approve") => parts.next().map(|task_id| ControlCommand::Approve {
+            task_id: task_id.to_string(),
+        }),
+        Some("/deny") => parts.next().map(|task_id| ControlCommand::Deny {
+            task_id: task_id.to_string(),
+        }),
         _ => None,
     }
 }

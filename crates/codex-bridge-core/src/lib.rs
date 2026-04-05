@@ -3,6 +3,9 @@
 /// Static runtime configuration values.
 pub mod config;
 
+/// Admin approval config and pending-approval pool primitives.
+pub mod admin_approval;
+
 /// Normalized event types derived from raw NapCat payloads.
 pub mod events;
 
@@ -30,7 +33,7 @@ pub mod workspace_guard;
 /// SQLite-backed runtime state storage.
 pub mod state_store;
 
-/// Versioned system prompt constants.
+/// Runtime-owned system prompt file helpers.
 pub mod system_prompt;
 
 /// Shared in-memory service state for the bridge runtime.

@@ -1,6 +1,6 @@
 //! Thin stdio runtime wrapper for `codex app-server`.
 
-use std::{collections::VecDeque, path::PathBuf, process::Stdio, sync::Mutex as StdMutex};
+use std::{collections::VecDeque, env, path::PathBuf, process::Stdio, sync::Mutex as StdMutex};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -22,11 +22,11 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     approval_guard::{ApprovalDecision, ApprovalGuard},
-    system_prompt::SYSTEM_PROMPT_TEXT,
+    system_prompt::load_system_prompt,
 };
 
 const DEFAULT_CLIENT_NAME: &str = "codex-bridge";
@@ -40,6 +40,13 @@ pub struct CodexRuntimeConfig {
     pub codex_repo_root: PathBuf,
     /// Workspace directory used for thread and turn execution.
     pub workspace_root: PathBuf,
+    /// Runtime-owned prompt file injected into threads at use time.
+    pub prompt_file: PathBuf,
+    /// Isolated HOME directory used to hide user-global repo skills.
+    pub child_home_root: PathBuf,
+    /// Isolated CODEX_HOME directory used for app-server state and system
+    /// skills.
+    pub codex_home_root: PathBuf,
     /// Client name reported during initialize.
     pub client_name: String,
     /// Client version reported during initialize.
@@ -48,10 +55,19 @@ pub struct CodexRuntimeConfig {
 
 impl CodexRuntimeConfig {
     /// Build runtime configuration from repository and workspace roots.
-    pub fn new(codex_repo_root: impl Into<PathBuf>, workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        codex_repo_root: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
+        prompt_file: impl Into<PathBuf>,
+        child_home_root: impl Into<PathBuf>,
+        codex_home_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             codex_repo_root: codex_repo_root.into(),
             workspace_root: workspace_root.into(),
+            prompt_file: prompt_file.into(),
+            child_home_root: child_home_root.into(),
+            codex_home_root: codex_home_root.into(),
             client_name: DEFAULT_CLIENT_NAME.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -369,6 +385,13 @@ impl CodexRuntime {
     }
 }
 
+/// Return whether an app-server error indicates a stale thread binding whose
+/// rollout no longer exists in the current Codex state store.
+pub fn is_missing_thread_rollout_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("no rollout found for thread id")
+}
+
 #[async_trait]
 impl CodexExecutor for CodexRuntime {
     async fn ensure_thread(
@@ -381,18 +404,37 @@ impl CodexExecutor for CodexRuntime {
                 let request_id = self.next_request_id().await;
                 let request = ClientRequest::ThreadResume {
                     request_id: request_id.clone(),
-                    params: build_thread_resume_params(&self.config, thread_id),
+                    params: build_thread_resume_params(&self.config, thread_id)?,
                 };
-                let response: ThreadResumeResponse = self
-                    .send_request(request, request_id, "thread/resume")
-                    .await?;
-                Ok(response.thread.id)
+                match self
+                    .send_request::<ThreadResumeResponse>(request, request_id, "thread/resume")
+                    .await
+                {
+                    Ok(response) => Ok(response.thread.id),
+                    Err(error) if is_missing_thread_rollout_error(&error) => {
+                        warn!(
+                            thread_id,
+                            conversation_key,
+                            "stale codex thread binding detected; creating a fresh thread"
+                        );
+                        let request_id = self.next_request_id().await;
+                        let request = ClientRequest::ThreadStart {
+                            request_id: request_id.clone(),
+                            params: build_thread_start_params(&self.config, conversation_key)?,
+                        };
+                        let response: ThreadStartResponse = self
+                            .send_request(request, request_id, "thread/start")
+                            .await?;
+                        Ok(response.thread.id)
+                    },
+                    Err(error) => Err(error),
+                }
             },
             None => {
                 let request_id = self.next_request_id().await;
                 let request = ClientRequest::ThreadStart {
                     request_id: request_id.clone(),
-                    params: build_thread_start_params(&self.config, conversation_key),
+                    params: build_thread_start_params(&self.config, conversation_key)?,
                 };
                 let response: ThreadStartResponse = self
                     .send_request(request, request_id, "thread/start")
@@ -472,7 +514,8 @@ async fn spawn_protocol_state(
     let command = build_codex_app_server_command(config);
     let mut child = Command::new(&command[0])
         .args(&command[1..])
-        .current_dir(&config.codex_repo_root)
+        .current_dir(codex_app_server_workdir(config))
+        .envs(build_codex_app_server_env(config))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -648,6 +691,38 @@ pub fn build_codex_app_server_command(config: &CodexRuntimeConfig) -> Vec<String
     ]
 }
 
+/// Return the working directory used to launch the local `codex-app-server`.
+pub fn codex_app_server_workdir(config: &CodexRuntimeConfig) -> PathBuf {
+    config.workspace_root.clone()
+}
+
+/// Return the isolated child environment used to launch `codex-app-server`.
+pub fn build_codex_app_server_env(config: &CodexRuntimeConfig) -> Vec<(String, String)> {
+    let real_home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| real_home.join(".cargo"));
+    let rustup_home = env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| real_home.join(".rustup"));
+    vec![
+        ("HOME".to_string(), config.child_home_root.to_string_lossy().into_owned()),
+        ("CODEX_HOME".to_string(), config.codex_home_root.to_string_lossy().into_owned()),
+        (
+            "XDG_CONFIG_HOME".to_string(),
+            config
+                .child_home_root
+                .join(".config")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("CARGO_HOME".to_string(), cargo_home.to_string_lossy().into_owned()),
+        ("RUSTUP_HOME".to_string(), rustup_home.to_string_lossy().into_owned()),
+    ]
+}
+
 impl RuntimeWriteState {
     async fn write_message<T>(&mut self, message: T) -> Result<()>
     where
@@ -698,33 +773,36 @@ impl RuntimeReadState {
 pub fn build_thread_start_params(
     config: &CodexRuntimeConfig,
     conversation_key: &str,
-) -> ThreadStartParams {
-    ThreadStartParams {
+) -> Result<ThreadStartParams> {
+    let prompt = load_system_prompt(&config.prompt_file)?;
+    Ok(ThreadStartParams {
         cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
         approval_policy: Some(default_approval_policy()),
         approvals_reviewer: Some(ApprovalsReviewer::User),
         sandbox: Some(SandboxMode::WorkspaceWrite),
         service_name: (!conversation_key.is_empty()).then(|| conversation_key.to_string()),
-        developer_instructions: Some(SYSTEM_PROMPT_TEXT.to_string()),
+        developer_instructions: Some(prompt),
         persist_extended_history: true,
         ..Default::default()
-    }
+    })
 }
 
-/// Build `thread/resume` params without mutating the existing prompt version.
+/// Build `thread/resume` params using the current runtime-owned prompt file.
 pub fn build_thread_resume_params(
     config: &CodexRuntimeConfig,
     thread_id: &str,
-) -> ThreadResumeParams {
-    ThreadResumeParams {
+) -> Result<ThreadResumeParams> {
+    let prompt = load_system_prompt(&config.prompt_file)?;
+    Ok(ThreadResumeParams {
         thread_id: thread_id.to_string(),
         cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
         approval_policy: Some(default_approval_policy()),
         approvals_reviewer: Some(ApprovalsReviewer::User),
         sandbox: Some(SandboxMode::WorkspaceWrite),
+        developer_instructions: Some(prompt),
         persist_extended_history: true,
         ..Default::default()
-    }
+    })
 }
 
 /// Build `turn/start` params using the QQ bot's fixed safety policy.
@@ -733,12 +811,23 @@ pub fn build_turn_start_params(
     thread_id: &str,
     input_text: &str,
 ) -> TurnStartParams {
+    // Skill selection in Codex matches by exact path against discovered metadata.
+    // Repo skills are discovered from `.agents/skills` but stored as canonical real
+    // paths, so the injected selection must point at the real skill file under
+    // `skills/`.
+    let reply_skill_path = config.workspace_root.join("skills/reply-current/SKILL.md");
     TurnStartParams {
         thread_id: thread_id.to_string(),
-        input: vec![UserInput::Text {
-            text: input_text.to_string(),
-            text_elements: Vec::new(),
-        }],
+        input: vec![
+            UserInput::Text {
+                text: input_text.to_string(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Skill {
+                name: "reply-current".to_string(),
+                path: reply_skill_path,
+            },
+        ],
         cwd: Some(config.workspace_root.clone()),
         approval_policy: Some(default_approval_policy()),
         approvals_reviewer: Some(ApprovalsReviewer::User),

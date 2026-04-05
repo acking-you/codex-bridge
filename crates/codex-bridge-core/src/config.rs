@@ -17,6 +17,10 @@ pub struct RuntimeConfig {
     pub websocket_port: u16,
     /// Maximum number of queued Codex tasks.
     pub queue_capacity: usize,
+    /// Maximum number of requests waiting for admin approval.
+    pub pending_approval_capacity: usize,
+    /// Timeout in seconds for pending admin approvals.
+    pub approval_timeout_secs: u64,
     /// Emoji-like identifier used for the group "salute" start reaction.
     pub group_start_reaction_emoji_id: String,
     /// Optional QQ executable override.
@@ -32,6 +36,8 @@ impl Default for RuntimeConfig {
             websocket_host: "127.0.0.1".to_string(),
             websocket_port: 3012,
             queue_capacity: 5,
+            pending_approval_capacity: 32,
+            approval_timeout_secs: 900,
             group_start_reaction_emoji_id: "282".to_string(),
             qq_executable: None,
         }

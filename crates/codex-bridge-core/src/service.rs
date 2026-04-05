@@ -59,8 +59,8 @@ pub struct TaskSnapshot {
     pub last_terminal_summary: Option<String>,
     /// Conversation key for the most recent retryable task, if any.
     pub last_retryable_conversation_key: Option<String>,
-    /// Active system prompt version, if available.
-    pub prompt_version: Option<String>,
+    /// Runtime-owned system prompt file currently used for turn injection.
+    pub prompt_file: Option<String>,
 }
 
 impl Default for SessionSnapshot {

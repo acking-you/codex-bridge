@@ -18,8 +18,7 @@ use codex_bridge_core::{
     },
     scheduler::Scheduler,
     service::{FriendProfile, SendMessageReceipt, ServiceCommand, ServiceState},
-    state_store::{ConversationBinding, StateStore},
-    system_prompt::SYSTEM_PROMPT_VERSION,
+    state_store::{ConversationBinding, StateStore, TaskStatus},
 };
 use tempfile::TempDir;
 use tokio::{
@@ -181,29 +180,38 @@ fn make_task(source_message_id: i64, conversation_key: &str) -> TaskRequest {
     }
 }
 
-fn make_private_event(message_id: i64, text: &str) -> NormalizedEvent {
+fn make_private_event_from(
+    sender_id: i64,
+    sender_name: &str,
+    message_id: i64,
+    text: &str,
+) -> NormalizedEvent {
     serde_json::json!({
         "post_type": "message",
         "message_type": "private",
         "message_id": message_id,
-        "user_id": 42,
+        "user_id": sender_id,
         "self_id": 2993013575i64,
-        "sender": { "nickname": "LB" },
+        "sender": { "nickname": sender_name },
         "message": [{ "type": "text", "data": { "text": text } }]
     })
     .try_into()
     .expect("normalize private event")
 }
 
-fn make_command_request(command: ControlCommand) -> CommandRequest {
+fn make_private_event(message_id: i64, text: &str) -> NormalizedEvent {
+    make_private_event_from(42, "LB", message_id, text)
+}
+
+fn make_command_request_from(sender_id: i64, command: ControlCommand) -> CommandRequest {
     CommandRequest {
         command,
-        conversation_key: "private:42".to_string(),
-        reply_target_id: 42,
+        conversation_key: format!("private:{sender_id}"),
+        reply_target_id: sender_id,
         is_group: false,
         source_message_id: 9001,
-        source_sender_id: 42,
-        source_sender_name: "LB".to_string(),
+        source_sender_id: sender_id,
+        source_sender_name: if sender_id == 42 { "LB".to_string() } else { "admin".to_string() },
     }
 }
 
@@ -275,13 +283,42 @@ fn spawn_bridge_sink(
 
 fn runtime_config(repo_root: &std::path::Path) -> OrchestratorConfig {
     let artifacts_dir = repo_root.join(".run/artifacts");
+    let prompt_file = repo_root.join(".run/default/prompt/system_prompt.md");
     std::fs::create_dir_all(&artifacts_dir).expect("create artifacts dir");
+    std::fs::create_dir_all(prompt_file.parent().expect("prompt dir")).expect("create prompt dir");
+    std::fs::write(&prompt_file, "prompt from test runtime").expect("write prompt file");
     OrchestratorConfig {
         queue_capacity: 5,
         repo_root: repo_root.to_path_buf(),
         artifacts_dir,
+        prompt_file,
         group_start_reaction_emoji_id: "282".to_string(),
+        admin_user_id: 2_394_626_220,
+        pending_approval_capacity: 32,
+        approval_timeout_secs: 900,
     }
+}
+
+fn runtime_config_with_timeout(
+    repo_root: &std::path::Path,
+    approval_timeout_secs: u64,
+) -> OrchestratorConfig {
+    let mut config = runtime_config(repo_root);
+    config.approval_timeout_secs = approval_timeout_secs;
+    config
+}
+
+async fn wait_for_snapshot_prompt_file(state: &ServiceState) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state.task_snapshot().await.prompt_file.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("orchestrator initialized");
 }
 
 #[tokio::test]
@@ -328,7 +365,6 @@ async fn task_request_persists_conversation_binding_when_missing() {
 
     assert_eq!(binding.conversation_key, "private:17");
     assert_eq!(binding.thread_id, "thread-1");
-    assert_eq!(binding.prompt_version, SYSTEM_PROMPT_VERSION);
 }
 
 #[tokio::test]
@@ -346,7 +382,6 @@ async fn task_request_reuses_binding_for_follow_up_task() {
         .upsert_binding(&ConversationBinding {
             conversation_key: "private:88".to_string(),
             thread_id: "thread-2".to_string(),
-            prompt_version: "legacy-v1".to_string(),
         })
         .expect("seed legacy binding");
 
@@ -384,7 +419,6 @@ async fn task_request_reuses_binding_for_follow_up_task() {
         .expect("binding exists");
 
     assert_eq!(binding.thread_id, "thread-2");
-    assert_eq!(binding.prompt_version, "legacy-v1");
 }
 
 #[tokio::test]
@@ -408,26 +442,8 @@ async fn cancel_command_interrupts_active_turn() {
         runtime_config(tempdir.path()),
     ));
 
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if state.task_snapshot().await.prompt_version.as_deref() == Some(SYSTEM_PROMPT_VERSION)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("orchestrator initialized");
-    state
-        .set_friends(vec![FriendProfile {
-            user_id: 42,
-            nickname: "LB".to_string(),
-            remark: None,
-        }])
-        .await;
-
-    state.publish_event(make_private_event(3001, "开始长任务"));
+    wait_for_snapshot_prompt_file(&state).await;
+    state.publish_event(make_private_event_from(2_394_626_220, "admin", 3001, "开始长任务"));
 
     timeout(Duration::from_secs(1), async {
         loop {
@@ -436,7 +452,7 @@ async fn cancel_command_interrupts_active_turn() {
                 .await
                 .running_conversation_key
                 .as_deref()
-                == Some("private:42")
+                == Some("private:2394626220")
             {
                 break;
             }
@@ -447,7 +463,7 @@ async fn cancel_command_interrupts_active_turn() {
     .expect("task started");
 
     state
-        .send_control_command(make_command_request(ControlCommand::Cancel))
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Cancel))
         .await
         .expect("send cancel");
 
@@ -514,17 +530,7 @@ async fn non_friend_private_message_is_rejected_before_codex() {
     ));
 
     state.set_friends(Vec::<FriendProfile>::new()).await;
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if state.task_snapshot().await.prompt_version.as_deref() == Some(SYSTEM_PROMPT_VERSION)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("orchestrator initialized");
+    wait_for_snapshot_prompt_file(&state).await;
     state.publish_event(make_private_event(4001, "在吗"));
 
     timeout(Duration::from_secs(1), async {
@@ -571,20 +577,10 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
         state.clone(),
         control_rx,
         codex,
-        store,
+        store.clone(),
         runtime_config(tempdir.path()),
     ));
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if state.task_snapshot().await.prompt_version.as_deref() == Some(SYSTEM_PROMPT_VERSION)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("orchestrator initialized");
+    wait_for_snapshot_prompt_file(&state).await;
 
     let raw = serde_json::json!({
         "post_type": "message",
@@ -603,6 +599,29 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
     let event = NormalizedEvent::try_from(raw).expect("normalize group event");
     state.publish_event(event);
 
+    let pending = timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(task) = store
+                .lock()
+                .await
+                .latest_task_for_conversation("group:777")
+                .expect("query group task")
+            {
+                break task;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("group task pending");
+
+    state
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
+            task_id: pending.task_id,
+        }))
+        .await
+        .expect("approve group task");
+
     timeout(Duration::from_secs(1), async {
         loop {
             let messages = sent_messages.lock().expect("messages").clone();
@@ -618,6 +637,213 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
     })
     .await
     .expect("group salute and fallback reply");
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn non_admin_friend_private_message_waits_for_admin_approval() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-10"], "turn-10", "已批准执行"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+    state
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
+        .await;
+
+    state.publish_event(make_private_event(6001, "帮我跑个任务"));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let messages = sent_messages.lock().expect("messages").clone();
+            if messages
+                .iter()
+                .any(|text| text == "这件事要先得到管理员点头……等他确认下来，我再继续。")
+                && messages.iter().any(|text| text.contains("待审批任务："))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval notices delivered");
+
+    assert!(codex.ensure_thread_calls().await.is_empty());
+
+    let pending = store
+        .lock()
+        .await
+        .latest_task_for_conversation("private:42")
+        .expect("query pending task")
+        .expect("pending task exists");
+    assert_eq!(pending.status, TaskStatus::PendingApproval);
+
+    state
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
+            task_id: pending.task_id.clone(),
+        }))
+        .await
+        .expect("approve pending task");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !codex.ensure_thread_calls().await.is_empty()
+                && sent_messages
+                    .lock()
+                    .expect("messages")
+                    .iter()
+                    .any(|text| text == "已经处理完了，但这次没有生成可回传的结果。")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approved task executed");
+
+    let completed = store
+        .lock()
+        .await
+        .task_by_id(&pending.task_id)
+        .expect("query completed task")
+        .expect("completed task exists");
+    assert_eq!(completed.status, TaskStatus::Completed);
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn duplicate_pending_approval_from_same_conversation_is_rejected() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-11"], "turn-11", "不会执行"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+    state
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
+        .await;
+
+    state.publish_event(make_private_event(6101, "第一条"));
+    state.publish_event(make_private_event(6102, "第二条"));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text == "这段会话已经有一条在等管理员确认了，先别一下子塞太多给我……")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("duplicate approval rejection");
+
+    assert!(codex.ensure_thread_calls().await.is_empty());
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn pending_approval_expires_without_admin_reply() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-12"], "turn-12", "不会执行"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        runtime_config_with_timeout(tempdir.path(), 1),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+    state
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
+        .await;
+
+    state.publish_event(make_private_event(6201, "等审批超时"));
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text == "这条请求等管理员确认等太久了，已经自动作废。")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending approval expired");
+
+    let expired = store
+        .lock()
+        .await
+        .latest_task_for_conversation("private:42")
+        .expect("query expired task")
+        .expect("expired task exists");
+    assert_eq!(expired.status, TaskStatus::Expired);
+    assert!(codex.ensure_thread_calls().await.is_empty());
 
     run_handle.abort();
     bridge_handle.abort();

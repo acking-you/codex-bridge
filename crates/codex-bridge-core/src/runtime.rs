@@ -11,7 +11,11 @@ use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::config::RuntimeConfig;
+use crate::{
+    admin_approval::{default_admin_config_template, AdminConfig},
+    config::RuntimeConfig,
+    system_prompt::ensure_prompt_file,
+};
 
 /// Generated tokens written into runtime state files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,10 +39,16 @@ pub struct RuntimePaths {
     pub artifacts_dir: PathBuf,
     /// Runtime config directory.
     pub config_dir: PathBuf,
+    /// Runtime-owned admin approval config file.
+    pub admin_config_file: PathBuf,
     /// Runtime log directory.
     pub logs_dir: PathBuf,
     /// Runtime cache directory.
     pub cache_dir: PathBuf,
+    /// Runtime prompt directory.
+    pub prompt_dir: PathBuf,
+    /// Runtime-owned operator-editable system prompt file.
+    pub prompt_file: PathBuf,
     /// Runtime process/state directory.
     pub run_dir: PathBuf,
     /// Persistent state database path.
@@ -53,6 +63,10 @@ pub struct RuntimePaths {
     pub agents_dir: PathBuf,
     /// `.agents/skills` symlink target path.
     pub agents_skills_link: PathBuf,
+    /// Isolated HOME directory for the child codex app-server process.
+    pub codex_child_home_dir: PathBuf,
+    /// Isolated CODEX_HOME directory for the child codex app-server process.
+    pub codex_home_dir: PathBuf,
     /// Base QQ installation directory.
     pub qq_base: PathBuf,
     /// QQ executable path.
@@ -89,14 +103,19 @@ impl RuntimePaths {
             runtime_root: runtime_root.clone(),
             artifacts_dir: project_root.join(".run/artifacts"),
             config_dir: runtime_root.join("config"),
+            admin_config_file: runtime_root.join("config/admin.toml"),
             logs_dir: runtime_root.join("logs"),
             cache_dir: runtime_root.join("cache"),
+            prompt_dir: runtime_root.join("prompt"),
+            prompt_file: runtime_root.join("prompt/system_prompt.md"),
             database_path: runtime_root.join("state.sqlite3"),
             launcher_env: run_dir.join("launcher.env"),
             reply_context_file: run_dir.join("reply_context.json"),
             skills_dir: project_root.join("skills"),
             agents_dir: project_root.join(".agents"),
             agents_skills_link: project_root.join(".agents/skills"),
+            codex_child_home_dir: runtime_root.join("home"),
+            codex_home_dir: runtime_root.join("codex-home"),
             run_dir,
             qq_base,
             qq_executable,
@@ -125,14 +144,22 @@ where
     fs::create_dir_all(&paths.config_dir)?;
     fs::create_dir_all(&paths.logs_dir)?;
     fs::create_dir_all(&paths.cache_dir)?;
+    fs::create_dir_all(&paths.prompt_dir)?;
     fs::create_dir_all(&paths.run_dir)?;
     fs::create_dir_all(&paths.artifacts_dir)?;
     fs::create_dir_all(&paths.skills_dir)?;
     fs::create_dir_all(&paths.agents_dir)?;
+    fs::create_dir_all(&paths.codex_child_home_dir)?;
+    fs::create_dir_all(&paths.codex_home_dir)?;
     if let Some(parent) = paths.database_path.parent() {
         fs::create_dir_all(parent)?;
     }
     ensure_skills_symlink(paths)?;
+    ensure_prompt_file(&paths.prompt_file)?;
+    ensure_admin_config_file(&paths.admin_config_file)?;
+    let _admin_config = AdminConfig::from_file(&paths.admin_config_file)?;
+    sync_codex_config(paths)?;
+    seed_codex_auth(paths)?;
 
     let mut env_values = read_env_file(&paths.launcher_env)?;
     if !env_values.contains_key("WEBUI_TOKEN") {
@@ -227,6 +254,56 @@ fn ensure_skills_symlink(paths: &RuntimePaths) -> Result<()> {
     }
     unix_fs::symlink(&paths.skills_dir, &paths.agents_skills_link)?;
     Ok(())
+}
+
+fn ensure_admin_config_file(path: &Path) -> Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, default_admin_config_template())?;
+    Ok(())
+}
+
+/// Load the runtime-owned admin approval config.
+pub fn load_admin_config(path: &Path) -> Result<AdminConfig> {
+    AdminConfig::from_file(path)
+}
+
+fn sync_codex_config(paths: &RuntimePaths) -> Result<()> {
+    let Some(source_codex_home) = source_codex_home_dir() else {
+        return Ok(());
+    };
+    let source_config = source_codex_home.join("config.toml");
+    if !source_config.is_file() {
+        return Ok(());
+    }
+    let destination_config = paths.codex_home_dir.join("config.toml");
+    fs::copy(source_config, destination_config)?;
+    Ok(())
+}
+
+fn seed_codex_auth(paths: &RuntimePaths) -> Result<()> {
+    let source_auth = source_codex_home_dir().map(|home| home.join("auth.json"));
+    let destination_auth = paths.codex_home_dir.join("auth.json");
+    if destination_auth.exists() {
+        return Ok(());
+    }
+    let Some(source_auth) = source_auth else {
+        return Ok(());
+    };
+    if source_auth.is_file() {
+        fs::copy(&source_auth, &destination_auth)?;
+    }
+    Ok(())
+}
+
+fn source_codex_home_dir() -> Option<PathBuf> {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
 }
 
 fn build_webui_config(config: &RuntimeConfig, token: &str) -> serde_json::Value {

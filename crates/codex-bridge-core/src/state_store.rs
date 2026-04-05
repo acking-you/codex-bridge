@@ -10,14 +10,14 @@ use anyhow::{Context, Result};
 use rusqlite::{params, types::Type, Connection, Error, OptionalExtension};
 use uuid::Uuid;
 
-use crate::system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION};
-
 /// State schema migration level.
-const CURRENT_SCHEMA_VERSION: i32 = 3;
+const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 /// Task lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
+    /// The task is waiting for explicit admin approval.
+    PendingApproval,
     /// The task has been queued and not started yet.
     Queued,
     /// The task is currently being processed.
@@ -30,28 +30,38 @@ pub enum TaskStatus {
     Canceled,
     /// The task was interrupted by runtime restart/recovery flow.
     Interrupted,
+    /// The task was denied by the admin approver.
+    Denied,
+    /// The task expired while waiting for admin approval.
+    Expired,
 }
 
 impl TaskStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::PendingApproval => "PendingApproval",
             Self::Queued => "Queued",
             Self::Running => "Running",
             Self::Completed => "Completed",
             Self::Failed => "Failed",
             Self::Canceled => "Canceled",
             Self::Interrupted => "Interrupted",
+            Self::Denied => "Denied",
+            Self::Expired => "Expired",
         }
     }
 
     fn from_storage_str(value: &str) -> rusqlite::Result<Self> {
         match value {
+            "PendingApproval" => Ok(Self::PendingApproval),
             "Queued" => Ok(Self::Queued),
             "Running" => Ok(Self::Running),
             "Completed" => Ok(Self::Completed),
             "Failed" => Ok(Self::Failed),
             "Canceled" => Ok(Self::Canceled),
             "Interrupted" => Ok(Self::Interrupted),
+            "Denied" => Ok(Self::Denied),
+            "Expired" => Ok(Self::Expired),
             other => Err(Error::FromSqlConversionFailure(
                 0,
                 Type::Text,
@@ -71,8 +81,6 @@ pub struct ConversationBinding {
     pub conversation_key: String,
     /// Bot runtime thread id bound to this conversation.
     pub thread_id: String,
-    /// System prompt version this conversation expects.
-    pub prompt_version: String,
 }
 
 /// Minimal task row returned by store queries.
@@ -80,6 +88,10 @@ pub struct ConversationBinding {
 pub struct TaskRecord {
     /// Stable task identifier.
     pub task_id: String,
+    /// Conversation key the task belongs to.
+    pub conversation_key: String,
+    /// Bound codex thread id when available.
+    pub thread_id: String,
     /// Current task status.
     pub status: TaskStatus,
     /// QQ identifier of the user that initiated the task.
@@ -125,12 +137,11 @@ impl StateStore {
     pub fn upsert_binding(&self, binding: &ConversationBinding) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO conversation_bindings (conversation_key, thread_id, prompt_version)
-                 VALUES (?1, ?2, ?3)
+                "INSERT INTO conversation_bindings (conversation_key, thread_id)
+                 VALUES (?1, ?2)
                  ON CONFLICT(conversation_key) DO UPDATE SET
-                   thread_id = excluded.thread_id,
-                   prompt_version = excluded.prompt_version",
-                params![binding.conversation_key, binding.thread_id, binding.prompt_version],
+                   thread_id = excluded.thread_id",
+                params![binding.conversation_key, binding.thread_id],
             )
             .context("upsert conversation binding")?;
         Ok(())
@@ -139,7 +150,7 @@ impl StateStore {
     /// Read an existing binding by conversation key.
     pub fn binding(&self, conversation_key: &str) -> Result<Option<ConversationBinding>> {
         let mut stmt = self.conn.prepare(
-            "SELECT conversation_key, thread_id, prompt_version
+            "SELECT conversation_key, thread_id
              FROM conversation_bindings
              WHERE conversation_key = ?1",
         )?;
@@ -147,7 +158,6 @@ impl StateStore {
             Ok(ConversationBinding {
                 conversation_key: row.get(0)?,
                 thread_id: row.get(1)?,
-                prompt_version: row.get(2)?,
             })
         })
         .optional()
@@ -171,14 +181,13 @@ impl StateStore {
         let task_id = Uuid::new_v4().to_string();
         self.conn
             .execute(
-                "INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, \
-                 owner_sender_id, source_message_id, status, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s', 'now'))",
+                "INSERT INTO task_runs (task_id, conversation_key, thread_id, owner_sender_id, \
+                 source_message_id, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s', 'now'))",
                 params![
                     task_id,
                     binding.conversation_key,
                     binding.thread_id,
-                    binding.prompt_version,
                     owner_sender_id,
                     source_message_id,
                     status.as_str(),
@@ -186,6 +195,48 @@ impl StateStore {
             )
             .context("insert task record")?;
         Ok(task_id)
+    }
+
+    /// Insert a task row before a codex thread is resolved.
+    pub fn insert_task_pending_approval(
+        &self,
+        conversation_key: &str,
+        owner_sender_id: i64,
+        source_message_id: i64,
+    ) -> Result<String> {
+        let task_id = Uuid::new_v4().to_string();
+        self.insert_task_pending_approval_with_id(
+            &task_id,
+            conversation_key,
+            owner_sender_id,
+            source_message_id,
+        )?;
+        Ok(task_id)
+    }
+
+    /// Insert a pending approval task row using a caller-provided task id.
+    pub fn insert_task_pending_approval_with_id(
+        &self,
+        task_id: &str,
+        conversation_key: &str,
+        owner_sender_id: i64,
+        source_message_id: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO task_runs (task_id, conversation_key, thread_id, owner_sender_id, \
+                 source_message_id, status, created_at)
+                 VALUES (?1, ?2, '', ?3, ?4, ?5, strftime('%s', 'now'))",
+                params![
+                    task_id,
+                    conversation_key,
+                    owner_sender_id,
+                    source_message_id,
+                    TaskStatus::PendingApproval.as_str(),
+                ],
+            )
+            .context("insert pending approval task record")?;
+        Ok(())
     }
 
     /// Update the status of an existing task row.
@@ -204,13 +255,38 @@ impl StateStore {
         }
     }
 
+    /// Attach a resolved codex binding to an existing task row and update its
+    /// status.
+    pub fn bind_task_to_thread(
+        &self,
+        task_id: &str,
+        binding: &ConversationBinding,
+        status: TaskStatus,
+    ) -> Result<()> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE task_runs
+                    SET conversation_key = ?1, thread_id = ?2, status = ?3
+                  WHERE task_id = ?4",
+                params![binding.conversation_key, binding.thread_id, status.as_str(), task_id],
+            )
+            .context("bind task to resolved thread")?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            anyhow::bail!("task record {task_id} not found for binding update");
+        }
+    }
+
     /// Return the latest task for a conversation, or `None` if absent.
     pub fn latest_task_for_conversation(
         &self,
         conversation_key: &str,
     ) -> Result<Option<TaskRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id, status, owner_sender_id, source_message_id
+            "SELECT task_id, conversation_key, thread_id, status, owner_sender_id, \
+             source_message_id
                FROM task_runs
               WHERE conversation_key = ?1
               ORDER BY created_at DESC, rowid DESC
@@ -219,16 +295,43 @@ impl StateStore {
         let record = stmt
             .query_row((conversation_key,), |row| {
                 let task_id: String = row.get(0)?;
-                let status_raw: String = row.get(1)?;
+                let status_raw: String = row.get(3)?;
                 Ok(TaskRecord {
                     task_id,
+                    conversation_key: row.get(1)?,
+                    thread_id: row.get(2)?,
                     status: TaskStatus::from_storage_str(&status_raw)?,
-                    owner_sender_id: row.get(2)?,
-                    source_message_id: row.get(3)?,
+                    owner_sender_id: row.get(4)?,
+                    source_message_id: row.get(5)?,
                 })
             })
             .optional()
             .context("query latest task")?;
+        Ok(record)
+    }
+
+    /// Read one task by task id.
+    pub fn task_by_id(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id, conversation_key, thread_id, status, owner_sender_id, \
+             source_message_id
+               FROM task_runs
+              WHERE task_id = ?1",
+        )?;
+        let record = stmt
+            .query_row((task_id,), |row| {
+                let status_raw: String = row.get(3)?;
+                Ok(TaskRecord {
+                    task_id: row.get(0)?,
+                    conversation_key: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    status: TaskStatus::from_storage_str(&status_raw)?,
+                    owner_sender_id: row.get(4)?,
+                    source_message_id: row.get(5)?,
+                })
+            })
+            .optional()
+            .context("query task by id")?;
         Ok(record)
     }
 
@@ -244,36 +347,16 @@ impl StateStore {
         Ok(updated)
     }
 
-    /// Check whether a system prompt version exists in the prompt-version
-    /// registry.
-    pub fn has_system_prompt_version(&self, version: &str) -> Result<bool> {
-        let mut stmt = self.conn.prepare(
-            "SELECT 1
-               FROM system_prompt_versions
-              WHERE version = ?1
-              LIMIT 1",
-        )?;
-        let present = stmt
-            .query_row((version,), |_| Ok(true))
-            .optional()
-            .context("query system prompt version")?
-            .unwrap_or(false);
-        Ok(present)
-    }
-
-    /// Return the exact prompt text for a stored version.
-    pub fn system_prompt_text_for(&self, version: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT prompt_text
-               FROM system_prompt_versions
-              WHERE version = ?1
-              LIMIT 1",
-        )?;
-        let text = stmt
-            .query_row((version,), |row| row.get(0))
-            .optional()
-            .context("query system prompt text")?;
-        Ok(text)
+    /// Mark all tasks currently waiting for approval as expired.
+    pub fn mark_pending_tasks_expired(&self) -> Result<usize> {
+        let updated = self
+            .conn
+            .execute("UPDATE task_runs SET status = ?1 WHERE status = ?2", params![
+                TaskStatus::Expired.as_str(),
+                TaskStatus::PendingApproval.as_str()
+            ])
+            .context("mark pending approval tasks expired")?;
+        Ok(updated)
     }
 
     fn migrate_and_seed(&mut self) -> Result<()> {
@@ -297,59 +380,26 @@ impl StateStore {
             tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
                 .context("write sqlite schema version")?;
             tx.commit().context("commit migration")?;
-        } else if current_version == 1 {
-            let tx = self
-                .conn
-                .transaction()
-                .context("start v1 to v2 migration transaction")?;
-            migrate_v1_to_v2(&tx).context("migrate sqlite schema from v1 to v2")?;
-            tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
-                .context("write sqlite schema version")?;
-            tx.commit().context("commit v1 to v2 migration")?;
-        } else if current_version == 2 {
-            let tx = self
-                .conn
-                .transaction()
-                .context("start v2 to v3 migration transaction")?;
-            migrate_v2_to_v3(&tx).context("migrate sqlite schema from v2 to v3")?;
-            tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
-                .context("write sqlite schema version")?;
-            tx.commit().context("commit v2 to v3 migration")?;
-        }
-
-        self.seed_current_system_prompt_version()
-            .context("seed current system prompt version")?;
-        Ok(())
-    }
-
-    fn seed_current_system_prompt_version(&self) -> Result<()> {
-        let existing = self
-            .conn
-            .query_row(
-                "SELECT prompt_text FROM system_prompt_versions WHERE version = ?1",
-                [SYSTEM_PROMPT_VERSION],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .context("read existing system prompt version row")?;
-
-        if let Some(existing) = existing {
-            if existing != SYSTEM_PROMPT_TEXT {
-                anyhow::bail!(
-                    "system prompt text changed for existing version {}",
-                    SYSTEM_PROMPT_VERSION
-                );
+        } else {
+            let mut version = current_version;
+            while version < CURRENT_SCHEMA_VERSION {
+                let tx = self
+                    .conn
+                    .transaction()
+                    .with_context(|| format!("start v{version} migration transaction"))?;
+                match version {
+                    1 => migrate_v1_to_v2(&tx).context("migrate sqlite schema from v1 to v2")?,
+                    2 => migrate_v2_to_v3(&tx).context("migrate sqlite schema from v2 to v3")?,
+                    3 => migrate_v3_to_v4(&tx).context("migrate sqlite schema from v3 to v4")?,
+                    other => anyhow::bail!("unsupported sqlite schema version {other}"),
+                }
+                version += 1;
+                tx.execute_batch(&format!("PRAGMA user_version = {version}"))
+                    .context("write sqlite schema version")?;
+                tx.commit()
+                    .with_context(|| format!("commit migration to v{version}"))?;
             }
-            return Ok(());
         }
-
-        self.conn
-            .execute(
-                "INSERT INTO system_prompt_versions (version, prompt_text, created_at)
-                   VALUES (?1, ?2, strftime('%s', 'now'))",
-                params![SYSTEM_PROMPT_VERSION, SYSTEM_PROMPT_TEXT],
-            )
-            .context("seed current system prompt version")?;
         Ok(())
     }
 }
@@ -358,14 +408,12 @@ fn run_initial_migration(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     tx.execute_batch(
         "CREATE TABLE conversation_bindings (
             conversation_key TEXT PRIMARY KEY,
-            thread_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL
+            thread_id TEXT NOT NULL
         );
         CREATE TABLE task_runs (
             task_id TEXT PRIMARY KEY,
             conversation_key TEXT NOT NULL,
             thread_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
             owner_sender_id INTEGER NOT NULL DEFAULT 0,
             source_message_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
@@ -374,11 +422,6 @@ fn run_initial_migration(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         CREATE TABLE bot_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );
-        CREATE TABLE system_prompt_versions (
-            version TEXT PRIMARY KEY,
-            prompt_text TEXT NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
         CREATE INDEX IF NOT EXISTS task_runs_by_conversation_created
             ON task_runs (conversation_key, created_at)",
@@ -391,11 +434,10 @@ fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         "ALTER TABLE conversation_bindings RENAME TO conversation_bindings_v1;
         CREATE TABLE conversation_bindings (
             conversation_key TEXT PRIMARY KEY,
-            thread_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL
+            thread_id TEXT NOT NULL
         );
-        INSERT INTO conversation_bindings (conversation_key, thread_id, prompt_version)
-            SELECT conversation_key, CAST(thread_id AS TEXT), prompt_version
+        INSERT INTO conversation_bindings (conversation_key, thread_id)
+            SELECT conversation_key, CAST(thread_id AS TEXT)
             FROM conversation_bindings_v1;
         DROP TABLE conversation_bindings_v1;
 
@@ -404,16 +446,14 @@ fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             task_id TEXT PRIMARY KEY,
             conversation_key TEXT NOT NULL,
             thread_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
             owner_sender_id INTEGER NOT NULL DEFAULT 0,
             source_message_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
-        INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, \
-         owner_sender_id, source_message_id, status, created_at)
-            SELECT task_id, conversation_key, CAST(thread_id AS TEXT), prompt_version, 0, 0, \
-         status, created_at
+        INSERT INTO task_runs (task_id, conversation_key, thread_id, owner_sender_id, \
+         source_message_id, status, created_at)
+            SELECT task_id, conversation_key, CAST(thread_id AS TEXT), 0, 0, status, created_at
             FROM task_runs_v1;
         DROP TABLE task_runs_v1;
 
@@ -430,4 +470,40 @@ fn migrate_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         ALTER TABLE task_runs ADD COLUMN source_message_id INTEGER NOT NULL DEFAULT 0;",
     )
     .context("add task owner/source columns")
+}
+
+fn migrate_v3_to_v4(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE conversation_bindings RENAME TO conversation_bindings_v3;
+        CREATE TABLE conversation_bindings (
+            conversation_key TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL
+        );
+        INSERT INTO conversation_bindings (conversation_key, thread_id)
+            SELECT conversation_key, thread_id
+            FROM conversation_bindings_v3;
+        DROP TABLE conversation_bindings_v3;
+
+        ALTER TABLE task_runs RENAME TO task_runs_v3;
+        CREATE TABLE task_runs (
+            task_id TEXT PRIMARY KEY,
+            conversation_key TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            owner_sender_id INTEGER NOT NULL DEFAULT 0,
+            source_message_id INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        INSERT INTO task_runs (task_id, conversation_key, thread_id, owner_sender_id, \
+         source_message_id, status, created_at)
+            SELECT task_id, conversation_key, thread_id, owner_sender_id, source_message_id, \
+         status, created_at
+            FROM task_runs_v3;
+        DROP TABLE task_runs_v3;
+
+        DROP INDEX IF EXISTS task_runs_by_conversation_created;
+        CREATE INDEX task_runs_by_conversation_created
+            ON task_runs (conversation_key, created_at);",
+    )
+    .context("drop prompt-version columns from runtime tables")
 }

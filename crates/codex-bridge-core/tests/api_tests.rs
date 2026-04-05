@@ -72,7 +72,7 @@ async fn send_private_route_rejects_empty_text() {
 }
 
 #[tokio::test]
-async fn status_route_returns_running_snapshot_and_prompt_version() {
+async fn status_route_returns_running_snapshot_and_prompt_file() {
     let state = ServiceState::for_tests();
     state
         .set_task_snapshot(TaskSnapshot {
@@ -82,7 +82,7 @@ async fn status_route_returns_running_snapshot_and_prompt_version() {
             queue_len: 2,
             last_terminal_summary: Some("已完成".to_string()),
             last_retryable_conversation_key: None,
-            prompt_version: Some("2026-04-05".to_string()),
+            prompt_file: Some(".run/default/prompt/system_prompt.md".to_string()),
         })
         .await;
 
@@ -97,6 +97,12 @@ async fn status_route_returns_running_snapshot_and_prompt_version() {
         .expect("status response");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(body.contains("Prompt file: .run/default/prompt/system_prompt.md"));
+    assert!(!body.contains("Prompt version"));
 }
 
 #[tokio::test]

@@ -1,26 +1,28 @@
 //! Codex runtime primitives tests.
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, CommandExecutionApprovalDecision,
     CommandExecutionRequestApprovalParams, FileChangeApprovalDecision,
     FileChangeRequestApprovalParams, ItemStartedNotification, ReadOnlyAccess,
     ReasoningTextDeltaNotification, SandboxPolicy, ServerNotification, Turn, TurnError,
-    TurnStartedNotification, TurnStatus,
+    TurnStartedNotification, TurnStatus, UserInput,
 };
 use codex_bridge_core::{
     approval_guard::ApprovalGuard,
     codex_runtime::{
-        build_codex_app_server_command, build_command_approval_response,
-        build_file_change_approval_response, build_thread_resume_params, build_thread_start_params,
-        build_turn_interrupt_params, build_turn_start_params, describe_server_notification,
-        extract_final_reply, summarize_turn_result,
+        build_codex_app_server_command, build_codex_app_server_env,
+        build_command_approval_response, build_file_change_approval_response,
+        build_thread_resume_params, build_thread_start_params, build_turn_interrupt_params,
+        build_turn_start_params, codex_app_server_workdir, describe_server_notification,
+        extract_final_reply, is_missing_thread_rollout_error, summarize_turn_result,
     },
-    system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION},
+    system_prompt::{load_system_prompt, DEFAULT_SYSTEM_PROMPT_TEMPLATE},
 };
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::json;
+use tempfile::tempdir;
 
 fn test_guard() -> ApprovalGuard {
     ApprovalGuard::new("/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ")
@@ -30,15 +32,31 @@ fn runtime_config() -> codex_bridge_core::codex_runtime::CodexRuntimeConfig {
     codex_bridge_core::codex_runtime::CodexRuntimeConfig::new(
         "/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs",
         "/tmp/codex-bridge",
+        "/tmp/codex-bridge/.run/default/prompt/system_prompt.md",
+        "/tmp/codex-bridge-home",
+        "/tmp/codex-bridge-codex-home",
     )
 }
 
 #[test]
 fn system_prompt_mentions_reply_skill_and_artifact_boundary() {
-    assert_eq!(SYSTEM_PROMPT_VERSION, "v2.0.0");
-    assert!(SYSTEM_PROMPT_TEXT.contains(".run/artifacts/"));
-    assert!(SYSTEM_PROMPT_TEXT.contains("reply skill"));
-    assert!(SYSTEM_PROMPT_TEXT.contains("inspect the host machine broadly"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains(".run/artifacts/"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("reply-current"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("inspect the host machine broadly"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("You are a cyber-human lifeform"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("If someone asks who you are"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("separate paragraph"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("must never delete files"));
+}
+
+#[test]
+fn load_system_prompt_rejects_empty_file() {
+    let dir = tempdir().expect("tempdir");
+    let prompt_file = dir.path().join("system_prompt.md");
+    fs::write(&prompt_file, "   \n").expect("write empty prompt");
+
+    let error = load_system_prompt(&prompt_file).expect_err("empty prompt should fail");
+    assert!(error.to_string().contains("empty"));
 }
 
 #[test]
@@ -75,6 +93,10 @@ fn runtime_config_builds_expected_paths() {
         PathBuf::from("/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs")
     );
     assert_eq!(config.workspace_root, PathBuf::from("/tmp/codex-bridge"));
+    assert_eq!(
+        config.prompt_file,
+        PathBuf::from("/tmp/codex-bridge/.run/default/prompt/system_prompt.md")
+    );
 }
 
 #[test]
@@ -96,28 +118,63 @@ fn codex_app_server_command_uses_explicit_bin_selection() {
 }
 
 #[test]
-fn thread_start_params_include_prompt_and_persisted_history() {
+fn codex_app_server_runs_from_workspace_root() {
     let config = runtime_config();
-    let params = build_thread_start_params(&config, "private:123");
+
+    assert_eq!(codex_app_server_workdir(&config), PathBuf::from("/tmp/codex-bridge"));
+}
+
+#[test]
+fn codex_app_server_env_isolates_home_and_codex_home() {
+    let config = runtime_config();
+    let env = build_codex_app_server_env(&config);
+
+    assert!(env.contains(&("HOME".to_string(), "/tmp/codex-bridge-home".to_string())));
+    assert!(env.contains(&("CODEX_HOME".to_string(), "/tmp/codex-bridge-codex-home".to_string())));
+}
+
+#[test]
+fn missing_thread_rollout_errors_are_detected() {
+    let error = anyhow::anyhow!(
+        "thread/resume failed: no rollout found for thread id 019d5d8f-c920-7093-a1ff-40dcfcca8c39"
+    );
+    assert!(is_missing_thread_rollout_error(&error));
+
+    let other = anyhow::anyhow!("thread/resume failed: permission denied");
+    assert!(!is_missing_thread_rollout_error(&other));
+}
+
+#[test]
+fn thread_start_params_include_prompt_and_persisted_history() {
+    let dir = tempdir().expect("tempdir");
+    let prompt_file = dir.path().join("system_prompt.md");
+    fs::write(&prompt_file, "prompt from file").expect("write prompt");
+    let mut config = runtime_config();
+    config.prompt_file = prompt_file;
+    let params = build_thread_start_params(&config, "private:123").expect("build start params");
 
     assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(params.sandbox, Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite));
     assert_eq!(params.service_name.as_deref(), Some("private:123"));
-    assert!(params.developer_instructions.is_some());
+    assert_eq!(params.developer_instructions.as_deref(), Some("prompt from file"));
     assert!(params.persist_extended_history);
 }
 
 #[test]
-fn thread_resume_params_keep_existing_prompt_version() {
-    let config = runtime_config();
-    let params = build_thread_resume_params(&config, "thread-1");
+fn thread_resume_params_reapply_current_system_prompt() {
+    let dir = tempdir().expect("tempdir");
+    let prompt_file = dir.path().join("system_prompt.md");
+    fs::write(&prompt_file, "prompt from runtime file").expect("write prompt");
+    let mut config = runtime_config();
+    config.prompt_file = prompt_file;
+    let params = build_thread_resume_params(&config, "thread-1").expect("build resume params");
 
     assert_eq!(params.thread_id, "thread-1");
     assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(params.sandbox, Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite));
-    assert!(params.developer_instructions.is_none());
+    assert_eq!(params.developer_instructions.as_deref(), Some("prompt from runtime file"));
     assert!(params.persist_extended_history);
 }
 
@@ -150,6 +207,11 @@ fn turn_start_params_use_workspace_write_and_granular_approvals() {
             exclude_slash_tmp: false,
         })
     );
+    assert_eq!(params.input.len(), 2);
+    assert_eq!(params.input[1], UserInput::Skill {
+        name: "reply-current".to_string(),
+        path: PathBuf::from("/tmp/codex-bridge/skills/reply-current/SKILL.md"),
+    });
 }
 
 #[test]

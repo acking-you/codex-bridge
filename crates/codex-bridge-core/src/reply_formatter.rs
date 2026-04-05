@@ -1,4 +1,4 @@
-use crate::scheduler::TaskSummary;
+use crate::{admin_approval::PendingApproval, scheduler::TaskSummary, state_store::TaskRecord};
 
 /// Return the persona-consistent private-chat ack for started tasks.
 pub fn format_started_private() -> String {
@@ -22,10 +22,81 @@ pub fn format_failure(message: &str) -> String {
 
 /// Return the help text describing trigger rules and local commands.
 pub fn format_help() -> String {
-    "触发方式：私聊默认触发，但非好友不会接入；群里需要先 @我。\n命令：/help /status /queue \
-     /cancel /retry_last\n权限：全机可读，仅当前仓库可写，新文件只会写到 \
-     .run/artifacts/，危险操作会被拒绝。"
+    "触发方式：私聊默认触发，但非好友不会接入；群里需要先 \
+     @我。除管理员私聊外，其他任务都要先过管理员确认。\n命令：/help /status /queue /cancel \
+     /retry_last /approve <task_id> /deny \
+     <task_id>\n权限：全机可读，仅当前仓库可写，新文件只会写到 .run/artifacts/，危险操作会被拒绝。"
         .to_string()
+}
+
+/// Return the message shown when the caller must wait for admin approval.
+pub fn format_waiting_for_admin_approval() -> String {
+    "这件事要先得到管理员点头……等他确认下来，我再继续。".to_string()
+}
+
+/// Return the message shown when one conversation is already waiting for
+/// approval.
+pub fn format_waiting_for_admin_approval_duplicate() -> String {
+    "这段会话已经有一条在等管理员确认了，先别一下子塞太多给我……".to_string()
+}
+
+/// Return the message shown when a non-admin user attempts an admin-only
+/// command.
+pub fn format_admin_only_command() -> String {
+    "这个命令只开放给管理员私聊使用。".to_string()
+}
+
+/// Return the message shown when a waiting task is denied.
+pub fn format_approval_denied() -> String {
+    "管理员这次没有点头，所以这条请求我先不执行。".to_string()
+}
+
+/// Return the message shown when a waiting task expires.
+pub fn format_approval_expired() -> String {
+    "这条请求等管理员确认等太久了，已经自动作废。".to_string()
+}
+
+/// Render the admin-facing approval notice for one pending task.
+pub fn format_admin_approval_notice(pending: &PendingApproval) -> String {
+    format!(
+        "待审批任务：{}\n来源：{}\n发起人：{} ({})\n消息：{}\n命令：/approve {} /deny {} /status \
+         {}",
+        pending.task_id,
+        if pending.task.is_group { "群聊" } else { "私聊" },
+        pending.task.source_sender_name,
+        pending.task.source_sender_id,
+        pending.task.source_text,
+        pending.task_id,
+        pending.task_id,
+        pending.task_id,
+    )
+}
+
+/// Render the admin-facing result after approving a task.
+pub fn format_admin_approved(task_id: &str) -> String {
+    format!("已批准任务：{task_id}")
+}
+
+/// Render the admin-facing result after denying a task.
+pub fn format_admin_denied(task_id: &str) -> String {
+    format!("已拒绝任务：{task_id}")
+}
+
+/// Render the admin-facing message when one task id cannot be found.
+pub fn format_admin_task_not_found(task_id: &str) -> String {
+    format!("没有找到任务：{task_id}")
+}
+
+/// Render the admin-facing status view for a persisted task.
+pub fn format_task_status(task: &TaskRecord) -> String {
+    format!(
+        "任务：{}\n状态：{:?}\n会话：{}\n发起人：{}\n源消息：{}",
+        task.task_id,
+        task.status,
+        task.conversation_key,
+        task.owner_sender_id,
+        task.source_message_id
+    )
 }
 
 /// Return the private gate message for non-friends.

@@ -120,13 +120,13 @@ async fn status_handler(
         .last_terminal_summary
         .clone()
         .unwrap_or_else(|| "无".to_string());
-    let prompt_version = snapshot
-        .prompt_version
+    let prompt_file = snapshot
+        .prompt_file
         .clone()
-        .unwrap_or_else(|| "2026-04-05".to_string());
+        .unwrap_or_else(|| "无".to_string());
     let text = format!(
         "当前任务：{running}\n会话：{running_conversation}\n排队数量：{queue_len}\n最近结果：\
-         {last}\nPrompt version: {prompt_version}"
+         {last}\nPrompt file: {prompt_file}"
     );
     Ok(Json(TextResponse {
         status: "ok",

@@ -103,7 +103,9 @@ fn group_mention_status_routes_to_command() {
     assert_eq!(
         decision,
         RouteDecision::Command(CommandRequest {
-            command: ControlCommand::Status,
+            command: ControlCommand::Status {
+                task_id: None,
+            },
             conversation_key: "group:777".to_string(),
             reply_target_id: 777,
             is_group: true,
@@ -138,11 +140,50 @@ fn private_status_command_has_context() {
     assert_eq!(
         decision,
         RouteDecision::Command(CommandRequest {
-            command: ControlCommand::Status,
+            command: ControlCommand::Status {
+                task_id: None,
+            },
             conversation_key: "private:11".to_string(),
             reply_target_id: 11,
             is_group: false,
             source_message_id: 1004,
+            source_sender_id: 11,
+            source_sender_name: "alice".to_string(),
+        })
+    );
+}
+
+#[test]
+fn private_approve_command_keeps_task_id() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 1005,
+        "user_id": 11,
+        "self_id": 99,
+        "raw_message": "/approve task-123",
+        "message": [
+            { "type": "text", "data": { "text": "/approve task-123" } }
+        ],
+        "sender": {
+            "nickname": "alice"
+        }
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize private message");
+    let mut router = MessageRouter::new();
+
+    let decision = router.route_event(event).expect("route decision");
+
+    assert_eq!(
+        decision,
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Approve {
+                task_id: "task-123".to_string(),
+            },
+            conversation_key: "private:11".to_string(),
+            reply_target_id: 11,
+            is_group: false,
+            source_message_id: 1005,
             source_sender_id: 11,
             source_sender_name: "alice".to_string(),
         })

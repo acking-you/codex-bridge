@@ -19,7 +19,7 @@ use codex_bridge_core::{
     launcher, napcat, orchestrator,
     outbound::ReplyRequest,
     reply_context::load_active_reply_context,
-    runtime::RuntimePaths,
+    runtime::{load_admin_config, RuntimePaths},
     service::ServiceState,
     state_store::StateStore,
 };
@@ -122,10 +122,14 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
 
     let codex_state = state.clone();
     let store = Arc::new(Mutex::new(StateStore::open(&prepared.paths.database_path)?));
+    let admin_config = load_admin_config(&prepared.paths.admin_config_file)?;
     let codex = Arc::new(
         CodexRuntime::new(CodexRuntimeConfig::new(
             codex_repo_root(&project_root),
             project_root.clone(),
+            prepared.paths.prompt_file.clone(),
+            prepared.paths.codex_child_home_dir.clone(),
+            prepared.paths.codex_home_dir.clone(),
         ))
         .await?,
     );
@@ -134,7 +138,11 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         queue_capacity: config.queue_capacity,
         repo_root: project_root.clone(),
         artifacts_dir: prepared.paths.artifacts_dir.clone(),
+        prompt_file: prepared.paths.prompt_file.clone(),
         group_start_reaction_emoji_id: config.group_start_reaction_emoji_id.clone(),
+        admin_user_id: admin_config.admin_user_id,
+        pending_approval_capacity: config.pending_approval_capacity,
+        approval_timeout_secs: config.approval_timeout_secs,
     };
     let orchestrator_task = tokio::spawn(async move {
         if let Err(error) =

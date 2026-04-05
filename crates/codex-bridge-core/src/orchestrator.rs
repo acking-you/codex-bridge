@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
@@ -14,6 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
+    admin_approval::{PendingApproval, PendingApprovalError, PendingApprovalPool},
     codex_runtime::{ActiveTurn, CodexExecutor, CodexTurnResult},
     message_router::{CommandRequest, ControlCommand, MessageRouter, RouteDecision, TaskRequest},
     reply_context::ActiveReplyContext,
@@ -21,7 +23,6 @@ use crate::{
     scheduler::{Scheduler, TaskQueueError, TaskState},
     service::ServiceState,
     state_store::{ConversationBinding, StateStore, TaskStatus},
-    system_prompt::SYSTEM_PROMPT_VERSION,
 };
 
 /// Abstract sink used by the orchestrator to send formatted replies.
@@ -43,8 +44,38 @@ pub struct OrchestratorConfig {
     pub repo_root: PathBuf,
     /// Artifact root exposed to the active reply context.
     pub artifacts_dir: PathBuf,
+    /// Runtime-owned prompt file exposed via operator status.
+    pub prompt_file: PathBuf,
     /// QQ emoji id used for the group "salute" reaction.
     pub group_start_reaction_emoji_id: String,
+    /// QQ identifier allowed to bypass approval from private chat.
+    pub admin_user_id: i64,
+    /// Maximum number of pending approvals held in memory.
+    pub pending_approval_capacity: usize,
+    /// Expiration timeout for pending approvals.
+    pub approval_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledRuntimeTask {
+    persisted_task_id: Option<String>,
+    task: TaskRequest,
+}
+
+impl ScheduledRuntimeTask {
+    fn fresh(task: TaskRequest) -> Self {
+        Self {
+            persisted_task_id: None,
+            task,
+        }
+    }
+
+    fn persisted(task_id: String, task: TaskRequest) -> Self {
+        Self {
+            persisted_task_id: Some(task_id),
+            task,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -105,7 +136,9 @@ async fn handle_command(
     let (is_group, target_id) = (command.is_group, command.reply_target_id);
     let text = match command.command {
         ControlCommand::Help => reply_formatter::format_help(),
-        ControlCommand::Status => reply_formatter::format_status(
+        ControlCommand::Status {
+            task_id: _,
+        } => reply_formatter::format_status(
             scheduler.running(),
             scheduler.queue_len(),
             scheduler.last_terminal(),
@@ -119,6 +152,12 @@ async fn handle_command(
             .retry_candidate(&command.conversation_key, command.source_sender_id)
             .map(|task| format!("已重新排队：{}", task.task_id))
             .unwrap_or_else(|| "当前会话没有可重试的失败任务。".to_string()),
+        ControlCommand::Approve {
+            task_id,
+        } => format!("审批能力尚未接入：{task_id}"),
+        ControlCommand::Deny {
+            task_id,
+        } => format!("审批能力尚未接入：{task_id}"),
     };
 
     send_reply(replies, is_group, target_id, text).await
@@ -251,17 +290,12 @@ async fn resolve_binding(
                 binding.thread_id = thread_id.clone();
                 should_update = true;
             }
-            if binding.prompt_version.trim().is_empty() {
-                binding.prompt_version = SYSTEM_PROMPT_VERSION.to_string();
-                should_update = true;
-            }
             (binding, should_update)
         },
         None => (
             ConversationBinding {
                 conversation_key: task.conversation_key.clone(),
                 thread_id: thread_id.clone(),
-                prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
             },
             true,
         ),
@@ -337,6 +371,18 @@ struct RuntimeTaskDeps<'a> {
     config: &'a OrchestratorConfig,
 }
 
+struct RuntimeCommandDeps<'a> {
+    replies: &'a dyn ReplySink,
+    scheduler: &'a mut Scheduler,
+    pending_tasks: &'a mut VecDeque<ScheduledRuntimeTask>,
+    retryable_tasks: &'a mut HashMap<String, TaskRequest>,
+    pending_approvals: &'a mut PendingApprovalPool,
+    active_task: Option<&'a ActiveRuntimeTask>,
+    codex: &'a Arc<dyn CodexExecutor>,
+    state_store: &'a Arc<Mutex<StateStore>>,
+    config: &'a OrchestratorConfig,
+}
+
 async fn execute_task_for_runtime(
     codex: Arc<dyn CodexExecutor>,
     state_store: Arc<Mutex<StateStore>>,
@@ -376,7 +422,7 @@ async fn execute_task_for_runtime(
 }
 
 async fn start_runtime_task(
-    task: TaskRequest,
+    scheduled: ScheduledRuntimeTask,
     scheduler: &mut Scheduler,
     deps: RuntimeTaskDeps<'_>,
     already_promoted: bool,
@@ -388,6 +434,7 @@ async fn start_runtime_task(
         state_store,
         config: runtime_config,
     } = deps;
+    let task = scheduled.task;
     let binding = resolve_binding(&task, codex.as_ref(), Some(state_store.as_ref())).await?;
     info!(
         conversation = %task.conversation_key,
@@ -398,7 +445,11 @@ async fn start_runtime_task(
         thread_id = %binding.thread_id,
         "starting orchestrated task"
     );
-    let persisted_task_id = {
+    let persisted_task_id = if let Some(task_id) = scheduled.persisted_task_id {
+        let store = state_store.lock().await;
+        store.bind_task_to_thread(&task_id, &binding, TaskStatus::Running)?;
+        task_id
+    } else {
         let store = state_store.lock().await;
         store.insert_task_with_source(
             &binding,
@@ -464,13 +515,18 @@ async fn start_runtime_task(
 }
 
 async fn enqueue_runtime_task(
-    task: TaskRequest,
+    scheduled: ScheduledRuntimeTask,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<TaskRequest>,
+    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
 ) -> Result<()> {
+    let task = scheduled.task.clone();
+    let queue_task_id = scheduled
+        .persisted_task_id
+        .clone()
+        .unwrap_or_else(|| task.source_message_id.to_string());
     match scheduler.enqueue(
-        task.source_message_id.to_string(),
+        queue_task_id,
         task.conversation_key.clone(),
         task.source_sender_id,
         task.source_message_id,
@@ -482,7 +538,7 @@ async fn enqueue_runtime_task(
                 position,
                 "task enqueued"
             );
-            pending_tasks.push_back(task.clone());
+            pending_tasks.push_back(scheduled);
             send_reply(
                 replies,
                 task.is_group,
@@ -524,6 +580,10 @@ async fn send_start_feedback(
     }
 }
 
+fn is_admin_private_task(task: &TaskRequest, admin_user_id: i64) -> bool {
+    !task.is_group && task.source_sender_id == admin_user_id
+}
+
 async fn private_sender_is_friend(state: &ServiceState, task: &TaskRequest) -> bool {
     state
         .friends()
@@ -532,15 +592,86 @@ async fn private_sender_is_friend(state: &ServiceState, task: &TaskRequest) -> b
         .any(|friend| friend.user_id == task.source_sender_id)
 }
 
+async fn register_pending_approval(
+    task: TaskRequest,
+    replies: &dyn ReplySink,
+    pending_approvals: &mut PendingApprovalPool,
+    state_store: &Arc<Mutex<StateStore>>,
+    approval_timeout_secs: u64,
+    admin_user_id: i64,
+) -> Result<()> {
+    let task_id = Uuid::new_v4().to_string();
+    let pending = PendingApproval::new(
+        task_id.clone(),
+        task.clone(),
+        Instant::now(),
+        Duration::from_secs(approval_timeout_secs),
+    );
+    match pending_approvals.insert(pending.clone()) {
+        Ok(()) => {},
+        Err(PendingApprovalError::ConversationAlreadyWaiting) => {
+            send_reply(
+                replies,
+                task.is_group,
+                task.reply_target_id,
+                reply_formatter::format_waiting_for_admin_approval_duplicate(),
+            )
+            .await?;
+            return Ok(());
+        },
+        Err(PendingApprovalError::PoolFull) => {
+            send_reply(
+                replies,
+                task.is_group,
+                task.reply_target_id,
+                reply_formatter::format_queue_full(),
+            )
+            .await?;
+            return Ok(());
+        },
+    }
+
+    {
+        let store = state_store.lock().await;
+        if let Err(error) = store.insert_task_pending_approval_with_id(
+            &task_id,
+            &task.conversation_key,
+            task.source_sender_id,
+            task.source_message_id,
+        ) {
+            let _ = pending_approvals.take(&task_id);
+            return Err(error);
+        }
+    }
+
+    send_reply(
+        replies,
+        task.is_group,
+        task.reply_target_id,
+        reply_formatter::format_waiting_for_admin_approval(),
+    )
+    .await?;
+    replies
+        .send_private(admin_user_id, reply_formatter::format_admin_approval_notice(&pending))
+        .await
+}
+
 async fn handle_runtime_command(
     command: CommandRequest,
-    replies: &dyn ReplySink,
-    scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<TaskRequest>,
-    retryable_tasks: &mut HashMap<String, TaskRequest>,
-    active_task: Option<&ActiveRuntimeTask>,
-    codex: &Arc<dyn CodexExecutor>,
-) -> Result<Option<TaskRequest>> {
+    deps: RuntimeCommandDeps<'_>,
+) -> Result<Option<ScheduledRuntimeTask>> {
+    let RuntimeCommandDeps {
+        replies,
+        scheduler,
+        pending_tasks,
+        retryable_tasks,
+        pending_approvals,
+        active_task,
+        codex,
+        state_store,
+        config,
+    } = deps;
+    let is_admin_private = !command.is_group && command.source_sender_id == config.admin_user_id;
     match command.command {
         ControlCommand::Help => {
             info!(
@@ -557,17 +688,41 @@ async fn handle_runtime_command(
             .await?;
             Ok(None)
         },
-        ControlCommand::Status => {
+        _ if !is_admin_private => {
+            send_reply(
+                replies,
+                command.is_group,
+                command.reply_target_id,
+                reply_formatter::format_admin_only_command(),
+            )
+            .await?;
+            Ok(None)
+        },
+        ControlCommand::Status {
+            task_id,
+        } => {
             info!(
                 conversation = %command.conversation_key,
                 sender_id = command.source_sender_id,
                 "received status command"
             );
-            let text = reply_formatter::format_status(
-                scheduler.running(),
-                scheduler.queue_len(),
-                scheduler.last_terminal(),
-            );
+            let text = if let Some(task_id) = task_id {
+                if let Some(pending) = pending_approvals.get(&task_id) {
+                    reply_formatter::format_admin_approval_notice(pending)
+                } else {
+                    let store = state_store.lock().await;
+                    store
+                        .task_by_id(&task_id)?
+                        .map(|task| reply_formatter::format_task_status(&task))
+                        .unwrap_or_else(|| reply_formatter::format_admin_task_not_found(&task_id))
+                }
+            } else {
+                reply_formatter::format_status(
+                    scheduler.running(),
+                    scheduler.queue_len(),
+                    scheduler.last_terminal(),
+                )
+            };
             send_reply(replies, command.is_group, command.reply_target_id, text).await?;
             Ok(None)
         },
@@ -632,11 +787,101 @@ async fn handle_runtime_command(
             };
 
             if active_task.is_some() {
-                enqueue_runtime_task(task, replies, scheduler, pending_tasks).await?;
+                enqueue_runtime_task(
+                    ScheduledRuntimeTask::fresh(task),
+                    replies,
+                    scheduler,
+                    pending_tasks,
+                )
+                .await?;
                 Ok(None)
             } else {
-                Ok(Some(task))
+                Ok(Some(ScheduledRuntimeTask::fresh(task)))
             }
+        },
+        ControlCommand::Approve {
+            task_id,
+        } => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                %task_id,
+                "received approve command"
+            );
+            let Some(pending) = pending_approvals.take(&task_id) else {
+                send_reply(
+                    replies,
+                    false,
+                    command.reply_target_id,
+                    reply_formatter::format_admin_task_not_found(&task_id),
+                )
+                .await?;
+                return Ok(None);
+            };
+            let scheduled = ScheduledRuntimeTask::persisted(task_id.clone(), pending.task.clone());
+            if active_task.is_some() {
+                {
+                    let store = state_store.lock().await;
+                    store.update_task_status(&task_id, TaskStatus::Queued)?;
+                }
+                enqueue_runtime_task(scheduled, replies, scheduler, pending_tasks).await?;
+            } else {
+                send_reply(
+                    replies,
+                    false,
+                    command.reply_target_id,
+                    reply_formatter::format_admin_approved(&task_id),
+                )
+                .await?;
+                return Ok(Some(scheduled));
+            }
+            send_reply(
+                replies,
+                false,
+                command.reply_target_id,
+                reply_formatter::format_admin_approved(&task_id),
+            )
+            .await?;
+            Ok(None)
+        },
+        ControlCommand::Deny {
+            task_id,
+        } => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                %task_id,
+                "received deny command"
+            );
+            let Some(pending) = pending_approvals.take(&task_id) else {
+                send_reply(
+                    replies,
+                    false,
+                    command.reply_target_id,
+                    reply_formatter::format_admin_task_not_found(&task_id),
+                )
+                .await?;
+                return Ok(None);
+            };
+            {
+                let store = state_store.lock().await;
+                store.update_task_status(&task_id, TaskStatus::Denied)?;
+            }
+            send_reply(
+                replies,
+                pending.task.is_group,
+                pending.task.reply_target_id,
+                reply_formatter::format_approval_denied(),
+            )
+            .await?;
+            send_reply(
+                replies,
+                false,
+                command.reply_target_id,
+                reply_formatter::format_admin_denied(&task_id),
+            )
+            .await?;
+            Ok(None)
         },
     }
 }
@@ -652,16 +897,23 @@ pub async fn run(
     let mut event_rx = state.subscribe_events();
     let mut router = MessageRouter::new();
     let mut scheduler = Scheduler::new(config.queue_capacity);
-    let mut pending_tasks: VecDeque<TaskRequest> = VecDeque::new();
+    let mut pending_tasks: VecDeque<ScheduledRuntimeTask> = VecDeque::new();
+    let mut pending_approvals = PendingApprovalPool::new(config.pending_approval_capacity);
     let mut retryable_tasks: HashMap<String, TaskRequest> = HashMap::new();
     let mut last_retryable_conversation_key: Option<String> = None;
     let mut active_task: Option<ActiveRuntimeTask> = None;
+    let mut approval_tick = tokio::time::interval(Duration::from_secs(1));
     let replies = ServiceReplySink {
         state: state.clone(),
     };
     recover_running_tasks(&state_store, &mut scheduler).await?;
-    refresh_snapshot(&state, &scheduler, &state_store, last_retryable_conversation_key.as_deref())
-        .await?;
+    refresh_snapshot(
+        &state,
+        &scheduler,
+        &config.prompt_file,
+        last_retryable_conversation_key.as_deref(),
+    )
+    .await?;
 
     loop {
         tokio::select! {
@@ -788,12 +1040,17 @@ pub async fn run(
                                 RouteDecision::Command(command_request) => {
                                     if let Some(task) = handle_runtime_command(
                                         command_request,
-                                        &replies,
-                                        &mut scheduler,
-                                        &mut pending_tasks,
-                                        &mut retryable_tasks,
-                                        active_task.as_ref(),
-                                        &codex,
+                                        RuntimeCommandDeps {
+                                            replies: &replies,
+                                            scheduler: &mut scheduler,
+                                            pending_tasks: &mut pending_tasks,
+                                            retryable_tasks: &mut retryable_tasks,
+                                            pending_approvals: &mut pending_approvals,
+                                            active_task: active_task.as_ref(),
+                                            codex: &codex,
+                                            state_store: &state_store,
+                                            config: &config,
+                                        },
                                     )
                                     .await? {
                                         active_task = Some(
@@ -814,7 +1071,10 @@ pub async fn run(
                                     }
                                 },
                                 RouteDecision::Task(task) => {
-                                    if !task.is_group && !private_sender_is_friend(&state, &task).await {
+                                    if !task.is_group
+                                        && !is_admin_private_task(&task, config.admin_user_id)
+                                        && !private_sender_is_friend(&state, &task).await
+                                    {
                                         info!(
                                             conversation = %task.conversation_key,
                                             sender_id = task.source_sender_id,
@@ -827,12 +1087,28 @@ pub async fn run(
                                             reply_formatter::format_friend_gate(),
                                         )
                                         .await?;
+                                    } else if !is_admin_private_task(&task, config.admin_user_id) {
+                                        register_pending_approval(
+                                            task,
+                                            &replies,
+                                            &mut pending_approvals,
+                                            &state_store,
+                                            config.approval_timeout_secs,
+                                            config.admin_user_id,
+                                        )
+                                        .await?;
                                     } else if active_task.is_some() {
-                                        enqueue_runtime_task(task, &replies, &mut scheduler, &mut pending_tasks).await?;
+                                        enqueue_runtime_task(
+                                            ScheduledRuntimeTask::fresh(task),
+                                            &replies,
+                                            &mut scheduler,
+                                            &mut pending_tasks,
+                                        )
+                                        .await?;
                                     } else {
                                         active_task = Some(
                                             start_runtime_task(
-                                                task,
+                                                ScheduledRuntimeTask::fresh(task),
                                                 &mut scheduler,
                                                 RuntimeTaskDeps {
                                                     replies: &replies,
@@ -863,12 +1139,17 @@ pub async fn run(
                 };
                 if let Some(task) = handle_runtime_command(
                     command_request,
-                    &replies,
-                    &mut scheduler,
-                    &mut pending_tasks,
-                    &mut retryable_tasks,
-                    active_task.as_ref(),
-                    &codex,
+                    RuntimeCommandDeps {
+                        replies: &replies,
+                        scheduler: &mut scheduler,
+                        pending_tasks: &mut pending_tasks,
+                        retryable_tasks: &mut retryable_tasks,
+                        pending_approvals: &mut pending_approvals,
+                        active_task: active_task.as_ref(),
+                        codex: &codex,
+                        state_store: &state_store,
+                        config: &config,
+                    },
                 )
                 .await? {
                     active_task = Some(
@@ -888,11 +1169,27 @@ pub async fn run(
                     );
                 }
             },
+            _ = approval_tick.tick() => {
+                let expired = pending_approvals.take_expired(Instant::now());
+                for pending in expired {
+                    {
+                        let store = state_store.lock().await;
+                        store.update_task_status(&pending.task_id, TaskStatus::Expired)?;
+                    }
+                    send_reply(
+                        &replies,
+                        pending.task.is_group,
+                        pending.task.reply_target_id,
+                        reply_formatter::format_approval_expired(),
+                    )
+                    .await?;
+                }
+            },
         }
         refresh_snapshot(
             &state,
             &scheduler,
-            &state_store,
+            &config.prompt_file,
             last_retryable_conversation_key.as_deref(),
         )
         .await?;
@@ -914,20 +1211,11 @@ fn service_command_to_router_command(
 async fn refresh_snapshot(
     state: &ServiceState,
     scheduler: &Scheduler,
-    state_store: &Arc<Mutex<StateStore>>,
+    prompt_file: &std::path::Path,
     last_retryable_conversation_key: Option<&str>,
 ) -> Result<()> {
     let running = scheduler.running().cloned();
     let running_conversation_key = running.as_ref().map(|task| task.conversation_key.clone());
-    let prompt_version = if let Some(conversation_key) = &running_conversation_key {
-        let store = state_store.lock().await;
-        store
-            .binding(conversation_key)?
-            .map(|binding| binding.prompt_version)
-            .unwrap_or_else(|| SYSTEM_PROMPT_VERSION.to_string())
-    } else {
-        SYSTEM_PROMPT_VERSION.to_string()
-    };
 
     let running = scheduler.running();
     let last_terminal_summary = scheduler
@@ -940,7 +1228,7 @@ async fn refresh_snapshot(
         queue_len: scheduler.queue_len(),
         last_terminal_summary,
         last_retryable_conversation_key: last_retryable_conversation_key.map(str::to_string),
-        prompt_version: Some(prompt_version),
+        prompt_file: Some(prompt_file.display().to_string()),
     };
     state.set_task_snapshot(snapshot).await;
     Ok(())
@@ -959,9 +1247,9 @@ async fn recover_running_tasks(
     state_store: &Arc<Mutex<StateStore>>,
     scheduler: &mut Scheduler,
 ) -> Result<()> {
-    let interrupted = {
+    let (interrupted, expired) = {
         let store = state_store.lock().await;
-        store.mark_running_tasks_interrupted()?
+        (store.mark_running_tasks_interrupted()?, store.mark_pending_tasks_expired()?)
     };
     if interrupted > 0 {
         scheduler.record_terminal_state(
@@ -971,6 +1259,16 @@ async fn recover_running_tasks(
             0,
             TaskState::Interrupted,
             Some(format!("系统重启后恢复了 {interrupted} 个未完成运行态任务。")),
+        );
+    }
+    if expired > 0 {
+        scheduler.record_terminal_state(
+            "approval-expired",
+            "system",
+            0,
+            0,
+            TaskState::Interrupted,
+            Some(format!("系统重启后作废了 {expired} 个待审批任务。")),
         );
     }
     Ok(())

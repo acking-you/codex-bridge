@@ -1,22 +1,8 @@
 //! SQLite state store tests.
 
-use codex_bridge_core::{
-    state_store::{ConversationBinding, StateStore, TaskStatus},
-    system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION},
-};
+use codex_bridge_core::state_store::{ConversationBinding, StateStore, TaskStatus};
 use rusqlite::Connection;
 use tempfile::TempDir;
-
-const LEGACY_SYSTEM_PROMPT_VERSION: &str = "v1.0.0";
-const LEGACY_SYSTEM_PROMPT_TEXT: &str =
-    "You are an assistant constrained to this project only.\nDo not help with other systems \
-     outside the repository under task. For this project,\nyou may use web search when external \
-     references are required and you may run low-risk\nshell inspection (for example, listing \
-     directories, reading non-sensitive logs,\nand checking process status). Do NOT use \
-     thread/shellCommand. Never issue or\nrecommend commands such as kill, pkill, killall, \
-     reboot, shutdown, poweroff,\nsystemctl stop, systemctl restart, or kill. If a request is \
-     blocked by policy,\nexplain the refusal clearly and switch to a safe workflow that still \
-     meets the\nintent if possible.";
 
 #[test]
 fn binding_round_trip() {
@@ -24,7 +10,6 @@ fn binding_round_trip() {
     let binding = ConversationBinding {
         conversation_key: "conv-1".to_string(),
         thread_id: "thr-100".to_string(),
-        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
     store.upsert_binding(&binding).expect("upsert binding");
@@ -42,7 +27,6 @@ fn running_task_marks_interrupted() {
     let binding = ConversationBinding {
         conversation_key: "conv-2".to_string(),
         thread_id: "thr-200".to_string(),
-        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
     store.upsert_binding(&binding).expect("upsert binding");
@@ -69,7 +53,6 @@ fn updated_task_status_is_not_recovered_as_running() {
     let binding = ConversationBinding {
         conversation_key: "conv-2b".to_string(),
         thread_id: "thr-250".to_string(),
-        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
     store.upsert_binding(&binding).expect("upsert binding");
@@ -99,7 +82,6 @@ fn latest_task_for_conversation_returns_recent() {
     let binding = ConversationBinding {
         conversation_key: "conv-3".to_string(),
         thread_id: "thr-300".to_string(),
-        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
     let first = store
@@ -124,7 +106,6 @@ fn task_source_metadata_round_trips() {
     let binding = ConversationBinding {
         conversation_key: "conv-source".to_string(),
         thread_id: "thr-350".to_string(),
-        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
     let task_id = store
@@ -142,59 +123,56 @@ fn task_source_metadata_round_trips() {
 }
 
 #[test]
-fn system_prompt_version_is_seeded() {
+fn pending_approval_task_round_trips_and_can_expire() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
-    assert!(store
-        .has_system_prompt_version(SYSTEM_PROMPT_VERSION)
-        .expect("query prompt version"));
+    let task_id = store
+        .insert_task_pending_approval("conv-pending", 7, 88001)
+        .expect("insert pending approval task");
+
+    let pending = store
+        .task_by_id(&task_id)
+        .expect("query pending task")
+        .expect("pending task exists");
+    assert_eq!(pending.status, TaskStatus::PendingApproval);
+    assert_eq!(pending.thread_id, "");
+
+    let expired = store
+        .mark_pending_tasks_expired()
+        .expect("mark pending tasks expired");
+    assert_eq!(expired, 1);
+
+    let expired_task = store
+        .task_by_id(&task_id)
+        .expect("query expired task")
+        .expect("expired task exists");
+    assert_eq!(expired_task.status, TaskStatus::Expired);
 }
 
 #[test]
-fn system_prompt_same_version_kept_if_unchanged() {
+fn schema_v4_drops_prompt_version_columns_from_runtime_tables() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("state.sqlite3");
 
-    let store = StateStore::open(&path).expect("initialize state");
-    let first = store
-        .system_prompt_text_for(SYSTEM_PROMPT_VERSION)
-        .expect("read prompt version text")
-        .expect("version exists");
-    drop(store);
-
-    let reopened = StateStore::open(&path).expect("reopen state");
-    let second = reopened
-        .system_prompt_text_for(SYSTEM_PROMPT_VERSION)
-        .expect("read prompt version text")
-        .expect("version exists");
-
-    assert_eq!(first, second);
-    assert_eq!(second, SYSTEM_PROMPT_TEXT);
-}
-
-#[test]
-fn system_prompt_same_version_with_different_text_fails() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let path = tempdir.path().join("state.sqlite3");
-
-    let store = StateStore::open(&path).expect("initialize state");
-    drop(store);
-
+    let _store = StateStore::open(&path).expect("initialize state");
     let conn = Connection::open(&path).expect("open sqlite db");
-    conn.execute("UPDATE system_prompt_versions SET prompt_text = ?1 WHERE version = ?2", [
-        "corrupted prompt",
-        SYSTEM_PROMPT_VERSION,
-    ])
-    .expect("corrupt prompt text");
 
-    let reopened = StateStore::open(&path);
-    assert!(
-        reopened.is_err(),
-        "expected reopening to fail when prompt text changed for same version"
-    );
+    let binding_columns = table_columns(&conn, "conversation_bindings");
+    assert_eq!(binding_columns, vec!["conversation_key", "thread_id"]);
+
+    let task_columns = table_columns(&conn, "task_runs");
+    assert_eq!(task_columns, vec![
+        "task_id",
+        "conversation_key",
+        "thread_id",
+        "owner_sender_id",
+        "source_message_id",
+        "status",
+        "created_at",
+    ]);
 }
 
 #[test]
-fn legacy_system_prompt_version_remains_and_current_version_is_seeded() {
+fn legacy_v3_store_migrates_without_prompt_version_columns() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("state.sqlite3");
     let conn = Connection::open(&path).expect("open sqlite db");
@@ -202,14 +180,16 @@ fn legacy_system_prompt_version_remains_and_current_version_is_seeded() {
         "
         CREATE TABLE conversation_bindings (
             conversation_key TEXT PRIMARY KEY,
-            thread_id INTEGER NOT NULL,
+            thread_id TEXT NOT NULL,
             prompt_version TEXT NOT NULL
         );
         CREATE TABLE task_runs (
             task_id TEXT PRIMARY KEY,
             conversation_key TEXT NOT NULL,
-            thread_id INTEGER NOT NULL,
+            thread_id TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
+            owner_sender_id INTEGER NOT NULL DEFAULT 0,
+            source_message_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
@@ -224,43 +204,45 @@ fn legacy_system_prompt_version_remains_and_current_version_is_seeded() {
         );
         CREATE INDEX task_runs_by_conversation_created
             ON task_runs (conversation_key, created_at);
+        INSERT INTO conversation_bindings (conversation_key, thread_id, prompt_version)
+            VALUES ('conv-legacy', '777', 'legacy-v1');
+        INSERT INTO task_runs (
+            task_id,
+            conversation_key,
+            thread_id,
+            prompt_version,
+            owner_sender_id,
+            source_message_id,
+            status,
+            created_at
+        ) VALUES ('task-1', 'conv-legacy', '777', 'legacy-v1', 42, 9001, 'Completed', \
+         strftime('%s','now'));
+        PRAGMA user_version = 3;
         ",
     )
     .expect("create legacy schema");
-    conn.execute(
-        "INSERT INTO system_prompt_versions (version, prompt_text, created_at) VALUES (?1, ?2, \
-         strftime('%s', 'now'))",
-        (&LEGACY_SYSTEM_PROMPT_VERSION, &LEGACY_SYSTEM_PROMPT_TEXT),
-    )
-    .expect("insert legacy prompt row");
-    conn.execute(
-        "INSERT INTO conversation_bindings (conversation_key, thread_id, prompt_version) VALUES \
-         (?1, ?2, ?3)",
-        ("conv-legacy", 777, LEGACY_SYSTEM_PROMPT_VERSION),
-    )
-    .expect("insert legacy binding row");
-    conn.execute_batch("PRAGMA user_version = 1")
-        .expect("set legacy schema version");
     drop(conn);
 
     let store = StateStore::open(&path).expect("open legacy db");
-    let legacy_binding = store
+    let binding = store
         .binding("conv-legacy")
-        .expect("read legacy binding after migration")
+        .expect("read legacy binding")
         .expect("legacy binding exists");
+    assert_eq!(binding.thread_id, "777");
 
-    let legacy = store
-        .system_prompt_text_for(LEGACY_SYSTEM_PROMPT_VERSION)
-        .expect("read legacy version row")
-        .expect("legacy version exists");
-    let current = store
-        .system_prompt_text_for(SYSTEM_PROMPT_VERSION)
-        .expect("read current version row")
-        .expect("current version exists");
-
-    assert_eq!(legacy, LEGACY_SYSTEM_PROMPT_TEXT);
-    assert_eq!(current, SYSTEM_PROMPT_TEXT);
-    assert_eq!(legacy_binding.thread_id, "777");
+    let conn = Connection::open(&path).expect("open migrated sqlite db");
+    let binding_columns = table_columns(&conn, "conversation_bindings");
+    let task_columns = table_columns(&conn, "task_runs");
+    assert_eq!(binding_columns, vec!["conversation_key", "thread_id"]);
+    assert_eq!(task_columns, vec![
+        "task_id",
+        "conversation_key",
+        "thread_id",
+        "owner_sender_id",
+        "source_message_id",
+        "status",
+        "created_at",
+    ]);
 }
 
 #[test]
@@ -269,9 +251,19 @@ fn state_store_open_fails_on_newer_schema() {
     let path = tempdir.path().join("state.sqlite3");
 
     let conn = Connection::open(&path).expect("open sqlite db");
-    conn.execute_batch("PRAGMA user_version = 4;")
+    conn.execute_batch("PRAGMA user_version = 5;")
         .expect("set newer schema version");
 
     let reopened = StateStore::open(&path);
     assert!(reopened.is_err(), "expected error when schema version is newer than supported");
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .expect("prepare pragma");
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query pragma");
+    rows.map(|row| row.expect("column name")).collect()
 }
