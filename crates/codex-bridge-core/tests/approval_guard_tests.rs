@@ -32,8 +32,5 @@ fn approval_guard_denies_non_inspection_shell_commands() {
 #[test]
 fn approval_guard_allows_git_status_outside_workspace() {
     let guard = ApprovalGuard::new("/repo");
-    assert_eq!(
-        guard.review_command("git status --short", "/tmp", &[]),
-        ApprovalDecision::Allow
-    );
+    assert_eq!(guard.review_command("git status --short", "/tmp", &[]), ApprovalDecision::Allow);
 }

@@ -8,6 +8,41 @@ use codex_bridge_core::{
 };
 
 #[test]
+fn private_help_routes_as_command_with_sender_metadata() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 9001,
+        "user_id": 42,
+        "self_id": 99,
+        "raw_message": "/help",
+        "message": [
+            { "type": "text", "data": { "text": "/help" } }
+        ],
+        "sender": {
+            "nickname": "alice"
+        }
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize private message");
+    let mut router = MessageRouter::new();
+
+    let decision = router.route_event(event).expect("route decision");
+
+    assert_eq!(
+        decision,
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Help,
+            conversation_key: "private:42".to_string(),
+            reply_target_id: 42,
+            is_group: false,
+            source_message_id: 9001,
+            source_sender_id: 42,
+            source_sender_name: "alice".to_string(),
+        })
+    );
+}
+
+#[test]
 fn private_message_routes_to_task_by_default() {
     let raw = serde_json::json!({
         "post_type": "message",
@@ -72,6 +107,9 @@ fn group_mention_status_routes_to_command() {
             conversation_key: "group:777".to_string(),
             reply_target_id: 777,
             is_group: true,
+            source_message_id: 1002,
+            source_sender_id: 11,
+            source_sender_name: "alice".to_string(),
         })
     );
 }
@@ -104,6 +142,9 @@ fn private_status_command_has_context() {
             conversation_key: "private:11".to_string(),
             reply_target_id: 11,
             is_group: false,
+            source_message_id: 1004,
+            source_sender_id: 11,
+            source_sender_name: "alice".to_string(),
         })
     );
 }

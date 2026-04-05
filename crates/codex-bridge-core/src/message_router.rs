@@ -10,6 +10,8 @@ use crate::events::{GroupMessageEvent, NormalizedEvent, PrivateMessageEvent};
 /// Available local control commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlCommand {
+    /// Return command help and trigger rules.
+    Help,
     /// Return current bot status.
     Status,
     /// Return current queue status.
@@ -50,6 +52,12 @@ pub struct CommandRequest {
     pub reply_target_id: i64,
     /// Indicates whether the source was a group chat.
     pub is_group: bool,
+    /// Source message identifier.
+    pub source_message_id: i64,
+    /// QQ identifier of the sender.
+    pub source_sender_id: i64,
+    /// Display name of the sender.
+    pub source_sender_name: String,
 }
 
 /// Routing decision for an incoming message.
@@ -155,6 +163,9 @@ impl MessageRouter {
                 conversation_key: format!("private:{}", event.sender_id),
                 reply_target_id: event.sender_id,
                 is_group: false,
+                source_message_id: event.message_id,
+                source_sender_id: event.sender_id,
+                source_sender_name: event.sender_name,
             }));
         }
 
@@ -188,6 +199,9 @@ impl MessageRouter {
                 conversation_key: format!("group:{}", event.group_id),
                 reply_target_id: event.group_id,
                 is_group: true,
+                source_message_id: event.message_id,
+                source_sender_id: event.sender_id,
+                source_sender_name: event.sender_name,
             }));
         }
 
@@ -205,6 +219,7 @@ impl MessageRouter {
 
 fn parse_command(text: &str) -> Option<ControlCommand> {
     match text.split_whitespace().next() {
+        Some("/help") => Some(ControlCommand::Help),
         Some("/status") => Some(ControlCommand::Status),
         Some("/queue") => Some(ControlCommand::Queue),
         Some("/cancel") => Some(ControlCommand::Cancel),

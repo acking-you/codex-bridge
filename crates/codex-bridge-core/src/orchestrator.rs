@@ -86,6 +86,7 @@ async fn handle_command(
 ) -> Result<()> {
     let (is_group, target_id) = (command.is_group, command.reply_target_id);
     let text = match command.command {
+        ControlCommand::Help => "可用命令：/help /status /queue /cancel /retry_last".to_string(),
         ControlCommand::Status => reply_formatter::format_status(
             scheduler.running(),
             scheduler.queue_len(),
@@ -97,7 +98,7 @@ async fn handle_command(
             "当前任务已取消。".to_string()
         },
         ControlCommand::RetryLast => scheduler
-            .retry_candidate(&command.conversation_key)
+            .retry_candidate(&command.conversation_key, command.source_sender_id)
             .map(|task| format!("已重新排队：{}", task.task_id))
             .unwrap_or_else(|| "当前会话没有可重试的失败任务。".to_string()),
     };
@@ -113,7 +114,12 @@ async fn handle_task(
     state_store: Option<&Mutex<StateStore>>,
 ) -> Result<()> {
     if scheduler.running().is_some() {
-        match scheduler.enqueue(task.source_message_id.to_string(), task.conversation_key.clone()) {
+        match scheduler.enqueue(
+            task.source_message_id.to_string(),
+            task.conversation_key.clone(),
+            task.source_sender_id,
+            task.source_message_id,
+        ) {
             Ok(position) => {
                 return send_reply(
                     replies,
@@ -151,12 +157,17 @@ async fn handle_task(
 
     let task_id = if let Some(store) = state_store {
         let store = store.lock().await;
-        store.insert_task(&binding, TaskStatus::Running)?
+        store.insert_task_with_source(
+            &binding,
+            TaskStatus::Running,
+            task.source_sender_id,
+            task.source_message_id,
+        )?
     } else {
         task.source_message_id.to_string()
     };
     scheduler
-        .start_task(&task_id, &task.conversation_key)
+        .start_task(&task_id, &task.conversation_key, task.source_sender_id, task.source_message_id)
         .map_err(|error| anyhow!("failed to start task: {error:?}"))?;
     send_reply(replies, task.is_group, task.reply_target_id, reply_formatter::format_started())
         .await?;
@@ -340,11 +351,21 @@ async fn start_runtime_task(
     let binding = resolve_binding(&task, codex.as_ref(), Some(state_store.as_ref())).await?;
     let persisted_task_id = {
         let store = state_store.lock().await;
-        store.insert_task(&binding, TaskStatus::Running)?
+        store.insert_task_with_source(
+            &binding,
+            TaskStatus::Running,
+            task.source_sender_id,
+            task.source_message_id,
+        )?
     };
     if !already_promoted {
         scheduler
-            .start_task(&persisted_task_id, &task.conversation_key)
+            .start_task(
+                &persisted_task_id,
+                &task.conversation_key,
+                task.source_sender_id,
+                task.source_message_id,
+            )
             .map_err(|error| anyhow!("failed to start task: {error:?}"))?;
     }
     send_reply(replies, task.is_group, task.reply_target_id, reply_formatter::format_started())
@@ -379,7 +400,12 @@ async fn enqueue_runtime_task(
     scheduler: &mut Scheduler,
     pending_tasks: &mut VecDeque<TaskRequest>,
 ) -> Result<()> {
-    match scheduler.enqueue(task.source_message_id.to_string(), task.conversation_key.clone()) {
+    match scheduler.enqueue(
+        task.source_message_id.to_string(),
+        task.conversation_key.clone(),
+        task.source_sender_id,
+        task.source_message_id,
+    ) {
         Ok(position) => {
             pending_tasks.push_back(task.clone());
             send_reply(
@@ -412,6 +438,16 @@ async fn handle_runtime_command(
     codex: &Arc<dyn CodexExecutor>,
 ) -> Result<Option<TaskRequest>> {
     match command.command {
+        ControlCommand::Help => {
+            send_reply(
+                replies,
+                command.is_group,
+                command.reply_target_id,
+                "可用命令：/help /status /queue /cancel /retry_last".to_string(),
+            )
+            .await?;
+            Ok(None)
+        },
         ControlCommand::Status => {
             let text = reply_formatter::format_status(
                 scheduler.running(),
@@ -439,7 +475,10 @@ async fn handle_runtime_command(
             Ok(None)
         },
         ControlCommand::RetryLast => {
-            let Some(task) = retryable_tasks.get(&command.conversation_key).cloned() else {
+            let Some(task) = scheduler
+                .retry_candidate(&command.conversation_key, command.source_sender_id)
+                .and_then(|summary| retryable_tasks.get(&summary.task_id).cloned())
+            else {
                 send_reply(
                     replies,
                     command.is_group,
@@ -496,7 +535,10 @@ pub async fn run(
                     Ok(Ok(outcome)) => {
                         scheduler.finish_running(outcome.task_state, outcome.summary.clone());
                         if matches!(outcome.task_state, TaskState::Failed | TaskState::Interrupted) {
-                            retryable_tasks.insert(current_task.task.conversation_key.clone(), current_task.task.clone());
+                            retryable_tasks.insert(
+                                current_task.task.source_message_id.to_string(),
+                                current_task.task.clone(),
+                            );
                             last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
                         }
                         send_reply(
@@ -510,7 +552,10 @@ pub async fn run(
                     Ok(Err(error)) => {
                         let message = format!("执行失败。原因：{error}");
                         scheduler.finish_running(TaskState::Failed, Some(message.clone()));
-                        retryable_tasks.insert(current_task.task.conversation_key.clone(), current_task.task.clone());
+                        retryable_tasks.insert(
+                            current_task.task.source_message_id.to_string(),
+                            current_task.task.clone(),
+                        );
                         last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
                         send_reply(
                             &replies,
@@ -523,7 +568,10 @@ pub async fn run(
                     Err(error) => {
                         let message = format!("执行失败。原因：后台任务异常退出：{error}");
                         scheduler.finish_running(TaskState::Failed, Some(message.clone()));
-                        retryable_tasks.insert(current_task.task.conversation_key.clone(), current_task.task.clone());
+                        retryable_tasks.insert(
+                            current_task.task.source_message_id.to_string(),
+                            current_task.task.clone(),
+                        );
                         last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
                         send_reply(
                             &replies,
@@ -714,6 +762,8 @@ async fn recover_running_tasks(
         scheduler.record_terminal_state(
             "recover",
             "system",
+            0,
+            0,
             TaskState::Interrupted,
             Some(format!("系统重启后恢复了 {interrupted} 个未完成运行态任务。")),
         );

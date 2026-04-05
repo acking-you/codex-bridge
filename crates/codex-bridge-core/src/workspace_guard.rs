@@ -34,11 +34,7 @@ impl WorkspaceGuard {
         })
     }
 
-    fn walk_and_apply(
-        &self,
-        path: &Path,
-        original_modes: &mut Vec<(PathBuf, u32)>,
-    ) -> Result<()> {
+    fn walk_and_apply(&self, path: &Path, original_modes: &mut Vec<(PathBuf, u32)>) -> Result<()> {
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("read metadata for {}", path.display()))?;
         if metadata.file_type().is_symlink() {
@@ -60,8 +56,8 @@ impl WorkspaceGuard {
         }
 
         if metadata.is_dir() {
-            for entry in fs::read_dir(path)
-                .with_context(|| format!("read directory {}", path.display()))?
+            for entry in
+                fs::read_dir(path).with_context(|| format!("read directory {}", path.display()))?
             {
                 let entry = entry?;
                 self.walk_and_apply(&entry.path(), original_modes)?;

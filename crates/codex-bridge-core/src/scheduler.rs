@@ -24,6 +24,10 @@ pub struct TaskSummary {
     pub task_id: String,
     /// Stable conversation key the task belongs to.
     pub conversation_key: String,
+    /// QQ identifier of the user that initiated the task.
+    pub owner_sender_id: i64,
+    /// Source QQ message identifier.
+    pub source_message_id: i64,
     /// Current lifecycle state.
     pub state: TaskState,
     /// Optional short summary for terminal states.
@@ -68,11 +72,15 @@ impl Scheduler {
         &mut self,
         task_id: &str,
         conversation_key: &str,
+        owner_sender_id: i64,
+        source_message_id: i64,
     ) -> Result<(), TaskQueueError> {
         assert!(self.running.is_none(), "attempted to start a task while another task was running");
         self.running = Some(TaskSummary {
             task_id: task_id.to_string(),
             conversation_key: conversation_key.to_string(),
+            owner_sender_id,
+            source_message_id,
             state: TaskState::Running,
             summary: None,
         });
@@ -84,6 +92,8 @@ impl Scheduler {
         &mut self,
         task_id: String,
         conversation_key: String,
+        owner_sender_id: i64,
+        source_message_id: i64,
     ) -> Result<usize, TaskQueueError> {
         if self.queued.len() >= self.queue_capacity {
             return Err(TaskQueueError::QueueFull);
@@ -92,6 +102,8 @@ impl Scheduler {
         self.queued.push_back(TaskSummary {
             task_id,
             conversation_key,
+            owner_sender_id,
+            source_message_id,
             state: TaskState::Queued,
             summary: None,
         });
@@ -128,6 +140,8 @@ impl Scheduler {
         &mut self,
         task_id: &str,
         conversation_key: &str,
+        owner_sender_id: i64,
+        source_message_id: i64,
         state: TaskState,
         summary: Option<String>,
     ) {
@@ -139,6 +153,8 @@ impl Scheduler {
         self.push_terminal(TaskSummary {
             task_id: task_id.to_string(),
             conversation_key: conversation_key.to_string(),
+            owner_sender_id,
+            source_message_id,
             state,
             summary,
         });
@@ -146,9 +162,14 @@ impl Scheduler {
 
     /// Return the latest terminal task candidate for retry in the same
     /// conversation.
-    pub fn retry_candidate(&self, conversation_key: &str) -> Option<TaskSummary> {
+    pub fn retry_candidate(
+        &self,
+        conversation_key: &str,
+        owner_sender_id: i64,
+    ) -> Option<TaskSummary> {
         self.last_terminal.iter().rev().find_map(|task| {
             if task.conversation_key == conversation_key
+                && task.owner_sender_id == owner_sender_id
                 && matches!(task.state, TaskState::Failed | TaskState::Interrupted)
             {
                 Some(task.clone())
@@ -218,7 +239,14 @@ mod tests {
         let mut scheduler = Scheduler::new(2);
         for index in 0..25 {
             let state = if index % 2 == 0 { TaskState::Failed } else { TaskState::Interrupted };
-            scheduler.record_terminal_state(&format!("task-{index}"), "private:1", state, None);
+            scheduler.record_terminal_state(
+                &format!("task-{index}"),
+                "private:1",
+                42,
+                1000 + index,
+                state,
+                None,
+            );
         }
 
         assert_eq!(scheduler.last_terminal.len(), Scheduler::DEFAULT_TERMINAL_HISTORY_CAPACITY);

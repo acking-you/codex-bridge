@@ -272,6 +272,9 @@ fn command_from_snapshot(
         conversation_key: conversation_key.to_string(),
         reply_target_id: target,
         is_group,
+        source_message_id: 0,
+        source_sender_id: 0,
+        source_sender_name: "local-cli".to_string(),
     })
 }
 
@@ -292,5 +295,8 @@ fn retry_command_from_snapshot(
         conversation_key: conversation_key.to_string(),
         reply_target_id: target,
         is_group,
+        source_message_id: 0,
+        source_sender_id: 0,
+        source_sender_name: "local-cli".to_string(),
     })
 }

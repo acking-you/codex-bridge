@@ -14,10 +14,7 @@ fn default_runtime_paths_live_under_project_run_dir() {
     assert_eq!(paths.artifacts_dir, project_root.join(".run/artifacts"));
     assert_eq!(paths.database_path, project_root.join(".run/default/state.sqlite3"));
     assert_eq!(paths.launcher_env, project_root.join(".run/default/run/launcher.env"));
-    assert_eq!(
-        paths.reply_context_file,
-        project_root.join(".run/default/run/reply_context.json")
-    );
+    assert_eq!(paths.reply_context_file, project_root.join(".run/default/run/reply_context.json"));
     assert_eq!(paths.skills_dir, project_root.join("skills"));
     assert_eq!(paths.agents_dir, project_root.join(".agents"));
     assert_eq!(paths.agents_skills_link, project_root.join(".agents/skills"));
@@ -43,11 +40,13 @@ fn prepare_runtime_state_creates_artifacts_dir() {
     let paths = RuntimePaths::new(project_root.path(), Some(qq_root.path().join("qq")));
     let config = RuntimeConfig::default();
 
-    let _tokens =
-        codex_bridge_core::runtime::prepare_runtime_state(&paths, &config, || "webui".into(), || {
-            "ws".into()
-        })
-        .unwrap();
+    let _tokens = codex_bridge_core::runtime::prepare_runtime_state(
+        &paths,
+        &config,
+        || "webui".into(),
+        || "ws".into(),
+    )
+    .unwrap();
 
     assert!(paths.runtime_root.is_dir());
     assert!(paths.artifacts_dir.is_dir());

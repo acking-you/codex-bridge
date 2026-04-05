@@ -198,6 +198,9 @@ fn make_command_request(command: ControlCommand) -> CommandRequest {
         conversation_key: "private:42".to_string(),
         reply_target_id: 42,
         is_group: false,
+        source_message_id: 9001,
+        source_sender_id: 42,
+        source_sender_name: "LB".to_string(),
     }
 }
 

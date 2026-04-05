@@ -119,6 +119,29 @@ fn latest_task_for_conversation_returns_recent() {
 }
 
 #[test]
+fn task_source_metadata_round_trips() {
+    let store = StateStore::open_in_memory().expect("open in-memory store");
+    let binding = ConversationBinding {
+        conversation_key: "conv-source".to_string(),
+        thread_id: "thr-350".to_string(),
+        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
+    };
+
+    let task_id = store
+        .insert_task_with_source(&binding, TaskStatus::Running, 42, 99001)
+        .expect("insert source-aware task");
+
+    let latest = store
+        .latest_task_for_conversation(&binding.conversation_key)
+        .expect("query latest task")
+        .expect("task exists");
+
+    assert_eq!(latest.task_id, task_id);
+    assert_eq!(latest.owner_sender_id, 42);
+    assert_eq!(latest.source_message_id, 99001);
+}
+
+#[test]
 fn system_prompt_version_is_seeded() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
     assert!(store
@@ -246,7 +269,7 @@ fn state_store_open_fails_on_newer_schema() {
     let path = tempdir.path().join("state.sqlite3");
 
     let conn = Connection::open(&path).expect("open sqlite db");
-    conn.execute_batch("PRAGMA user_version = 3;")
+    conn.execute_batch("PRAGMA user_version = 4;")
         .expect("set newer schema version");
 
     let reopened = StateStore::open(&path);

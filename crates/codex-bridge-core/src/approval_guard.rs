@@ -109,11 +109,11 @@ fn command_is_safe_inspection(command: &str) -> bool {
     };
 
     match command_name {
-        "ls" | "pwd" | "cat" | "rg" | "grep" | "find" | "head" | "tail" | "sed" | "awk"
-        | "ps" | "ss" | "lsof" | "top" | "free" | "df" | "du" | "curl" | "wget"
-        | "uname" | "whoami" | "id" | "env" | "printenv" | "stat" | "file" | "which"
-        | "whereis" | "readlink" | "realpath" | "date" | "netstat" | "journalctl" | "wc"
-        | "sort" | "uniq" | "cut" | "tr" => true,
+        "ls" | "pwd" | "cat" | "rg" | "grep" | "find" | "head" | "tail" | "sed" | "awk" | "ps"
+        | "ss" | "lsof" | "top" | "free" | "df" | "du" | "curl" | "wget" | "uname" | "whoami"
+        | "id" | "env" | "printenv" | "stat" | "file" | "which" | "whereis" | "readlink"
+        | "realpath" | "date" | "netstat" | "journalctl" | "wc" | "sort" | "uniq" | "cut"
+        | "tr" => true,
         "git" => git_subcommand_is_safe(tokens.get(idx + 1).map(String::as_str)),
         _ => false,
     }

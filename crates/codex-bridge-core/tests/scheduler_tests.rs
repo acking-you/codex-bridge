@@ -2,19 +2,29 @@
 
 use codex_bridge_core::scheduler::{Scheduler, TaskQueueError, TaskState};
 
+const OWNER_1: i64 = 101;
+const OWNER_2: i64 = 202;
+
 #[test]
 fn queue_rejects_the_sixth_waiting_task() {
     let mut scheduler = Scheduler::new(5);
-    scheduler.start_task("task-1", "private:1").expect("start");
+    scheduler
+        .start_task("task-1", "private:1", OWNER_1, 1001)
+        .expect("start");
 
     for index in 0..5 {
         scheduler
-            .enqueue(format!("task-{}", index + 2), format!("private:{}", index + 2))
+            .enqueue(
+                format!("task-{}", index + 2),
+                format!("private:{}", index + 2),
+                OWNER_1,
+                2000 + index as i64,
+            )
             .expect("enqueue");
     }
 
     let error = scheduler
-        .enqueue("task-7".to_string(), "private:7".to_string())
+        .enqueue("task-7".to_string(), "private:7".to_string(), OWNER_1, 2007)
         .expect_err("queue full");
     assert_eq!(error, TaskQueueError::QueueFull);
 }
@@ -23,18 +33,34 @@ fn queue_rejects_the_sixth_waiting_task() {
 #[should_panic(expected = "attempted to start a task while another task was running")]
 fn start_task_rejects_when_running_task_exists() {
     let mut scheduler = Scheduler::new(5);
-    scheduler.start_task("task-1", "private:1").expect("start");
-    let _ = scheduler.start_task("task-2", "private:2");
+    scheduler
+        .start_task("task-1", "private:1", OWNER_1, 1001)
+        .expect("start");
+    let _ = scheduler.start_task("task-2", "private:2", OWNER_2, 1002);
 }
 
 #[test]
-fn retry_last_is_scoped_to_the_same_conversation() {
+fn retry_last_is_scoped_to_the_same_conversation_and_owner() {
     let mut scheduler = Scheduler::new(5);
-    scheduler.record_terminal_state("task-a", "private:1", TaskState::Failed, Some("boom".into()));
-    scheduler.record_terminal_state("task-b", "private:2", TaskState::Interrupted, None);
+    scheduler.record_terminal_state(
+        "task-a",
+        "private:1",
+        OWNER_1,
+        3001,
+        TaskState::Failed,
+        Some("boom".into()),
+    );
+    scheduler.record_terminal_state(
+        "task-b",
+        "private:2",
+        OWNER_2,
+        3002,
+        TaskState::Interrupted,
+        None,
+    );
 
     let retry = scheduler
-        .retry_candidate("private:1")
+        .retry_candidate("private:1", OWNER_1)
         .expect("retry candidate");
     assert_eq!(retry.task_id, "task-a");
 }
@@ -42,11 +68,25 @@ fn retry_last_is_scoped_to_the_same_conversation() {
 #[test]
 fn retry_candidate_never_returns_canceled_task() {
     let mut scheduler = Scheduler::new(5);
-    scheduler.record_terminal_state("task-a", "private:1", TaskState::Canceled, None);
-    scheduler.record_terminal_state("task-b", "private:1", TaskState::Failed, Some("boom".into()));
+    scheduler.record_terminal_state(
+        "task-a",
+        "private:1",
+        OWNER_1,
+        3001,
+        TaskState::Canceled,
+        None,
+    );
+    scheduler.record_terminal_state(
+        "task-b",
+        "private:1",
+        OWNER_1,
+        3002,
+        TaskState::Failed,
+        Some("boom".into()),
+    );
 
     let retry = scheduler
-        .retry_candidate("private:1")
+        .retry_candidate("private:1", OWNER_1)
         .expect("retry candidate");
     assert_eq!(retry.task_id, "task-b");
 }
@@ -55,10 +95,10 @@ fn retry_candidate_never_returns_canceled_task() {
 fn finish_running_moves_next_waiting_task_into_running() {
     let mut scheduler = Scheduler::new(2);
     scheduler
-        .start_task("task-1", "private:1")
+        .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start first task");
     scheduler
-        .enqueue("task-2".to_string(), "private:2".to_string())
+        .enqueue("task-2".to_string(), "private:2".to_string(), OWNER_2, 1002)
         .expect("enqueue follow-up");
 
     let finished = scheduler
@@ -66,7 +106,9 @@ fn finish_running_moves_next_waiting_task_into_running() {
         .expect("finish running");
     let running = scheduler.running().expect("next running");
     assert_eq!(finished.task_id, "task-1");
+    assert_eq!(finished.owner_sender_id, OWNER_1);
     assert_eq!(running.task_id, "task-2");
+    assert_eq!(running.owner_sender_id, OWNER_2);
     assert_eq!(running.state, TaskState::Running);
     assert_eq!(scheduler.queue_len(), 0);
 }
@@ -75,7 +117,9 @@ fn finish_running_moves_next_waiting_task_into_running() {
 #[should_panic(expected = "attempted to finish with non-terminal state")]
 fn finish_running_requires_terminal_state() {
     let mut scheduler = Scheduler::new(2);
-    scheduler.start_task("task-1", "private:1").expect("start");
+    scheduler
+        .start_task("task-1", "private:1", OWNER_1, 1001)
+        .expect("start");
 
     let _ = scheduler.finish_running(TaskState::Queued, Some("wrong".into()));
 }
@@ -84,17 +128,17 @@ fn finish_running_requires_terminal_state() {
 #[should_panic(expected = "attempted to record non-terminal state")]
 fn terminal_recording_requires_terminal_state() {
     let mut scheduler = Scheduler::new(2);
-    scheduler.record_terminal_state("task-1", "private:1", TaskState::Queued, None);
+    scheduler.record_terminal_state("task-1", "private:1", OWNER_1, 1001, TaskState::Queued, None);
 }
 
 #[test]
 fn cancel_running_marks_canceled_and_promotes_next_task() {
     let mut scheduler = Scheduler::new(2);
     scheduler
-        .start_task("task-1", "private:1")
+        .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start first");
     scheduler
-        .enqueue("task-2".to_string(), "private:2".to_string())
+        .enqueue("task-2".to_string(), "private:2".to_string(), OWNER_2, 1002)
         .expect("enqueue second");
 
     let finished = scheduler.cancel_running().expect("cancel running");
@@ -119,10 +163,24 @@ fn finish_running_without_running_task_is_none() {
 #[test]
 fn retry_only_returns_failed_or_interrupted() {
     let mut scheduler = Scheduler::new(2);
-    scheduler.record_terminal_state("task-completed", "private:1", TaskState::Completed, None);
-    scheduler.record_terminal_state("task-canceled", "private:1", TaskState::Canceled, None);
+    scheduler.record_terminal_state(
+        "task-completed",
+        "private:1",
+        OWNER_1,
+        1001,
+        TaskState::Completed,
+        None,
+    );
+    scheduler.record_terminal_state(
+        "task-canceled",
+        "private:1",
+        OWNER_1,
+        1002,
+        TaskState::Canceled,
+        None,
+    );
 
-    let retry = scheduler.retry_candidate("private:1");
+    let retry = scheduler.retry_candidate("private:1", OWNER_1);
     assert!(retry.is_none());
 }
 
@@ -130,14 +188,14 @@ fn retry_only_returns_failed_or_interrupted() {
 fn start_can_be_called_after_finish() {
     let mut scheduler = Scheduler::new(2);
     scheduler
-        .start_task("task-1", "private:1")
+        .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start first");
     scheduler
         .finish_running(TaskState::Completed, Some("ok".into()))
         .expect("finished first");
 
     scheduler
-        .start_task("task-2", "private:2")
+        .start_task("task-2", "private:2", OWNER_2, 1002)
         .expect("start second after finish");
     assert_eq!(scheduler.running().expect("running").task_id, "task-2");
 }

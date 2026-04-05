@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION};
 
 /// State schema migration level.
-const CURRENT_SCHEMA_VERSION: i32 = 2;
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 /// Task lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +82,10 @@ pub struct TaskRecord {
     pub task_id: String,
     /// Current task status.
     pub status: TaskStatus,
+    /// QQ identifier of the user that initiated the task.
+    pub owner_sender_id: i64,
+    /// Source QQ message identifier.
+    pub source_message_id: i64,
 }
 
 /// SQLite-backed state persistence store.
@@ -152,17 +156,31 @@ impl StateStore {
 
     /// Insert a new task row and return the generated id.
     pub fn insert_task(&self, binding: &ConversationBinding, status: TaskStatus) -> Result<String> {
+        self.insert_task_with_source(binding, status, 0, 0)
+    }
+
+    /// Insert a new task row with owner/source metadata and return the
+    /// generated id.
+    pub fn insert_task_with_source(
+        &self,
+        binding: &ConversationBinding,
+        status: TaskStatus,
+        owner_sender_id: i64,
+        source_message_id: i64,
+    ) -> Result<String> {
         let task_id = Uuid::new_v4().to_string();
         self.conn
             .execute(
                 "INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, \
-                 status, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now'))",
+                 owner_sender_id, source_message_id, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s', 'now'))",
                 params![
                     task_id,
                     binding.conversation_key,
                     binding.thread_id,
                     binding.prompt_version,
+                    owner_sender_id,
+                    source_message_id,
                     status.as_str(),
                 ],
             )
@@ -192,7 +210,7 @@ impl StateStore {
         conversation_key: &str,
     ) -> Result<Option<TaskRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id, status
+            "SELECT task_id, status, owner_sender_id, source_message_id
                FROM task_runs
               WHERE conversation_key = ?1
               ORDER BY created_at DESC, rowid DESC
@@ -205,6 +223,8 @@ impl StateStore {
                 Ok(TaskRecord {
                     task_id,
                     status: TaskStatus::from_storage_str(&status_raw)?,
+                    owner_sender_id: row.get(2)?,
+                    source_message_id: row.get(3)?,
                 })
             })
             .optional()
@@ -286,6 +306,15 @@ impl StateStore {
             tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
                 .context("write sqlite schema version")?;
             tx.commit().context("commit v1 to v2 migration")?;
+        } else if current_version == 2 {
+            let tx = self
+                .conn
+                .transaction()
+                .context("start v2 to v3 migration transaction")?;
+            migrate_v2_to_v3(&tx).context("migrate sqlite schema from v2 to v3")?;
+            tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
+                .context("write sqlite schema version")?;
+            tx.commit().context("commit v2 to v3 migration")?;
         }
 
         self.seed_current_system_prompt_version()
@@ -337,6 +366,8 @@ fn run_initial_migration(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             conversation_key TEXT NOT NULL,
             thread_id TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
+            owner_sender_id INTEGER NOT NULL DEFAULT 0,
+            source_message_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
@@ -374,13 +405,15 @@ fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             conversation_key TEXT NOT NULL,
             thread_id TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
+            owner_sender_id INTEGER NOT NULL DEFAULT 0,
+            source_message_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
-        INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, status, \
-         created_at)
-            SELECT task_id, conversation_key, CAST(thread_id AS TEXT), prompt_version, status, \
-         created_at
+        INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, \
+         owner_sender_id, source_message_id, status, created_at)
+            SELECT task_id, conversation_key, CAST(thread_id AS TEXT), prompt_version, 0, 0, \
+         status, created_at
             FROM task_runs_v1;
         DROP TABLE task_runs_v1;
 
@@ -389,4 +422,12 @@ fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             ON task_runs (conversation_key, created_at);",
     )
     .context("rewrite v1 integer thread ids to text")
+}
+
+fn migrate_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE task_runs ADD COLUMN owner_sender_id INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE task_runs ADD COLUMN source_message_id INTEGER NOT NULL DEFAULT 0;",
+    )
+    .context("add task owner/source columns")
 }
