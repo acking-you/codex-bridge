@@ -35,7 +35,13 @@ pub struct ActiveReplyContext {
 #[derive(Debug)]
 pub struct ReplyRegistry {
     context_file: PathBuf,
-    active: Option<ActiveReplyContext>,
+    active: Option<ActiveReplyState>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveReplyState {
+    context: ActiveReplyContext,
+    send_count: usize,
 }
 
 impl ReplyRegistry {
@@ -49,24 +55,47 @@ impl ReplyRegistry {
 
     /// Activate a new reply context and mirror it to disk.
     pub fn activate(&mut self, context: ActiveReplyContext) -> Result<()> {
-        self.active = Some(context);
+        self.active = Some(ActiveReplyState {
+            context,
+            send_count: 0,
+        });
         self.persist()
     }
 
     /// Resolve the currently active reply token.
     pub fn resolve(&self, token: &str) -> Result<ActiveReplyContext> {
-        let Some(context) = &self.active else {
+        let Some(state) = &self.active else {
             bail!("reply token is not active");
         };
-        if context.token != token {
+        if state.context.token != token {
             bail!("reply token is not active");
         }
-        Ok(context.clone())
+        Ok(state.context.clone())
     }
 
     /// Return the currently active reply context, if present.
     pub fn current(&self) -> Option<ActiveReplyContext> {
-        self.active.clone()
+        self.active.as_ref().map(|state| state.context.clone())
+    }
+
+    /// Mark one successful skill-driven reply send.
+    pub fn mark_sent(&mut self, token: &str) -> Result<usize> {
+        let Some(state) = self.active.as_mut() else {
+            bail!("reply token is not active");
+        };
+        if state.context.token != token {
+            bail!("reply token is not active");
+        }
+        state.send_count += 1;
+        Ok(state.send_count)
+    }
+
+    /// Return how many successful reply sends happened for the active task.
+    pub fn current_send_count(&self) -> usize {
+        self.active
+            .as_ref()
+            .map(|state| state.send_count)
+            .unwrap_or(0)
     }
 
     /// Revoke the active reply context and remove the on-disk mirror.
@@ -82,9 +111,9 @@ impl ReplyRegistry {
         }
 
         match &self.active {
-            Some(context) => {
+            Some(state) => {
                 let payload =
-                    serde_json::to_vec_pretty(context).context("serialize reply context")?;
+                    serde_json::to_vec_pretty(&state.context).context("serialize reply context")?;
                 fs::write(&self.context_file, payload)
                     .with_context(|| format!("write {}", self.context_file.display()))?;
             },

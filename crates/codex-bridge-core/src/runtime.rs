@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
+    os::unix::fs as unix_fs,
     path::{Path, PathBuf},
 };
 
@@ -126,9 +127,12 @@ where
     fs::create_dir_all(&paths.cache_dir)?;
     fs::create_dir_all(&paths.run_dir)?;
     fs::create_dir_all(&paths.artifacts_dir)?;
+    fs::create_dir_all(&paths.skills_dir)?;
+    fs::create_dir_all(&paths.agents_dir)?;
     if let Some(parent) = paths.database_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    ensure_skills_symlink(paths)?;
 
     let mut env_values = read_env_file(&paths.launcher_env)?;
     if !env_values.contains_key("WEBUI_TOKEN") {
@@ -204,6 +208,24 @@ fn write_env_file(path: &Path, values: &BTreeMap<String, String>) -> Result<()> 
 fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
     let payload = serde_json::to_string_pretty(value)?;
     fs::write(path, format!("{payload}\n"))?;
+    Ok(())
+}
+
+fn ensure_skills_symlink(paths: &RuntimePaths) -> Result<()> {
+    if let Ok(link_metadata) = fs::symlink_metadata(&paths.agents_skills_link) {
+        if link_metadata.file_type().is_symlink() {
+            let target = fs::read_link(&paths.agents_skills_link)?;
+            if target == paths.skills_dir {
+                return Ok(());
+            }
+        }
+        if link_metadata.is_dir() {
+            fs::remove_dir_all(&paths.agents_skills_link)?;
+        } else {
+            fs::remove_file(&paths.agents_skills_link)?;
+        }
+    }
+    unix_fs::symlink(&paths.skills_dir, &paths.agents_skills_link)?;
     Ok(())
 }
 

@@ -179,6 +179,20 @@ impl Scheduler {
         })
     }
 
+    /// Return the latest terminal retry candidate for a conversation regardless
+    /// of task owner.
+    pub fn retry_candidate_any_owner(&self, conversation_key: &str) -> Option<TaskSummary> {
+        self.last_terminal.iter().rev().find_map(|task| {
+            if task.conversation_key == conversation_key
+                && matches!(task.state, TaskState::Failed | TaskState::Interrupted)
+            {
+                Some(task.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Current running task, if any.
     pub fn running(&self) -> Option<&TaskSummary> {
         self.running.as_ref()

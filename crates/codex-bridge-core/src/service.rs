@@ -324,6 +324,18 @@ impl ServiceState {
         registry.resolve(token)
     }
 
+    /// Mark one successful skill reply against the active token.
+    pub async fn mark_reply_sent(&self, token: &str) -> Result<usize> {
+        let mut registry = self.inner.reply_registry.lock().await;
+        registry.mark_sent(token)
+    }
+
+    /// Read the number of successful skill replies issued for the active task.
+    pub async fn current_reply_sent_count(&self) -> usize {
+        let registry = self.inner.reply_registry.lock().await;
+        registry.current_send_count()
+    }
+
     /// Dispatch a private-message send request to the bridge worker.
     pub async fn send_private_message(
         &self,

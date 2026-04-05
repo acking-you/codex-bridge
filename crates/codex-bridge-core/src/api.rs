@@ -236,8 +236,9 @@ async fn reply_handler(
     State(state): State<ServiceState>,
     Json(payload): Json<ReplyRequest>,
 ) -> Result<Json<SendMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let token = payload.token.clone();
     let context = state
-        .reply_context(payload.token.as_str())
+        .reply_context(token.as_str())
         .await
         .map_err(|error| bad_request(error.to_string().as_str()))?;
     let reply_payload = payload
@@ -246,6 +247,10 @@ async fn reply_handler(
     let outbound = build_outbound_message(&context, reply_payload);
     let receipt = state
         .send_outbound_message(outbound)
+        .await
+        .map_err(internal_error)?;
+    state
+        .mark_reply_sent(token.as_str())
         .await
         .map_err(internal_error)?;
     Ok(Json(SendMessageResponse {

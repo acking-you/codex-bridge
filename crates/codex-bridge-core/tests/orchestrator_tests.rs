@@ -13,12 +13,15 @@ use codex_bridge_core::{
     codex_runtime::{ActiveTurn, CodexExecutor, CodexTurnResult},
     events::NormalizedEvent,
     message_router::{CommandRequest, ControlCommand, RouteDecision, TaskRequest},
-    orchestrator::{self, handle_route_decision, handle_route_decision_with_store},
+    orchestrator::{
+        self, handle_route_decision, handle_route_decision_with_store, OrchestratorConfig,
+    },
     scheduler::Scheduler,
-    service::{SendMessageReceipt, ServiceCommand, ServiceState},
+    service::{FriendProfile, SendMessageReceipt, ServiceCommand, ServiceState},
     state_store::{ConversationBinding, StateStore},
     system_prompt::SYSTEM_PROMPT_VERSION,
 };
+use tempfile::TempDir;
 use tokio::{
     sync::{mpsc, Mutex as AsyncMutex, Notify},
     time::timeout,
@@ -231,12 +234,54 @@ fn spawn_bridge_sink(
                         message_id: 1,
                     }));
                 },
+                ServiceCommand::SetMessageReaction {
+                    message_id,
+                    emoji_id,
+                    respond_to,
+                } => {
+                    sent_messages
+                        .lock()
+                        .expect("messages")
+                        .push(format!("REACTION:{message_id}:{emoji_id}"));
+                    let _ = respond_to.send(Ok(()));
+                },
+                ServiceCommand::SendOutbound {
+                    message,
+                    respond_to,
+                } => {
+                    sent_messages.lock().expect("messages").push(format!(
+                        "OUTBOUND:{}:{}",
+                        match message.target {
+                            codex_bridge_core::outbound::OutboundTarget::Private(id) => {
+                                format!("private:{id}")
+                            },
+                            codex_bridge_core::outbound::OutboundTarget::Group(id) => {
+                                format!("group:{id}")
+                            },
+                        },
+                        message.segments.len()
+                    ));
+                    let _ = respond_to.send(Ok(SendMessageReceipt {
+                        message_id: 1,
+                    }));
+                },
                 ServiceCommand::Control {
                     ..
                 } => {},
             }
         }
     })
+}
+
+fn runtime_config(repo_root: &std::path::Path) -> OrchestratorConfig {
+    let artifacts_dir = repo_root.join(".run/artifacts");
+    std::fs::create_dir_all(&artifacts_dir).expect("create artifacts dir");
+    OrchestratorConfig {
+        queue_capacity: 5,
+        repo_root: repo_root.to_path_buf(),
+        artifacts_dir,
+        group_start_reaction_emoji_id: "282".to_string(),
+    }
 }
 
 #[tokio::test]
@@ -251,7 +296,7 @@ async fn task_request_sends_started_and_final_reply() {
         .expect("handle task");
 
     let sent = replies.messages();
-    assert_eq!(sent[0], "收到，开始处理。");
+    assert_eq!(sent[0], "欸、我先去看一下……稍等我一下。");
     assert_eq!(sent[1], "已经处理完成");
 }
 
@@ -354,8 +399,14 @@ async fn cancel_command_interrupts_active_turn() {
         StateStore::open_in_memory().expect("open in-memory state store"),
     ));
 
-    let run_handle =
-        tokio::spawn(orchestrator::run(state.clone(), control_rx, codex.clone(), store, 5));
+    let tempdir = TempDir::new().expect("tempdir");
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
 
     timeout(Duration::from_secs(1), async {
         loop {
@@ -368,6 +419,13 @@ async fn cancel_command_interrupts_active_turn() {
     })
     .await
     .expect("orchestrator initialized");
+    state
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
+        .await;
 
     state.publish_event(make_private_event(3001, "开始长任务"));
 
@@ -423,10 +481,143 @@ async fn cancel_command_interrupts_active_turn() {
     .expect("task interrupted");
 
     let messages = sent_messages.lock().expect("messages").clone();
-    assert!(messages.iter().any(|text| text == "收到，开始处理。"));
     assert!(messages
         .iter()
-        .any(|text| text == "已请求取消当前任务，等待任务停止。"));
+        .any(|text| text == "欸、我先去看一下……稍等我一下。"));
+    assert!(messages
+        .iter()
+        .any(|text| text == "收到，我去把这条任务拦下来……等它停住。"));
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn non_friend_private_message_is_rejected_before_codex() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-7"], "turn-7", "不会执行"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+
+    state.set_friends(Vec::<FriendProfile>::new()).await;
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state.task_snapshot().await.prompt_version.as_deref() == Some(SYSTEM_PROMPT_VERSION)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("orchestrator initialized");
+    state.publish_event(make_private_event(4001, "在吗"));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text == "那个……先加个好友吧。没加好友的私聊这边不会直接接入。")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("friend gate reply");
+
+    assert!(codex.ensure_thread_calls().await.is_empty());
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fallback() {
+    let codex = Arc::new(FakeCodexExecutor::with_status(
+        vec!["thread-8"],
+        "turn-8",
+        TurnStatus::Completed,
+        "",
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex,
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state.task_snapshot().await.prompt_version.as_deref() == Some(SYSTEM_PROMPT_VERSION)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("orchestrator initialized");
+
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 5001,
+        "group_id": 777,
+        "user_id": 42,
+        "self_id": 2993013575i64,
+        "raw_message": "@bot 生成一张图",
+        "message": [
+            { "type": "at", "data": { "qq": "2993013575", "name": "bot" } },
+            { "type": "text", "data": { "text": " 生成一张图" } }
+        ],
+        "sender": { "nickname": "alice" }
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize group event");
+    state.publish_event(event);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let messages = sent_messages.lock().expect("messages").clone();
+            if messages.iter().any(|text| text == "REACTION:5001:282")
+                && messages
+                    .iter()
+                    .any(|text| text == "已经处理完了，但这次没有生成可回传的结果。")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("group salute and fallback reply");
 
     run_handle.abort();
     bridge_handle.abort();

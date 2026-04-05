@@ -21,7 +21,7 @@ pub struct ReplyRequest {
 }
 
 /// Allowed reply payload forms.
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "Enum variant fields are self-descriptive transport data.")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyPayload {
     /// Plain-text QQ reply.
@@ -50,7 +50,7 @@ pub enum OutboundTarget {
 }
 
 /// Structured message segment understood by the NapCat transport adapter.
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "Enum variant fields are self-descriptive transport data.")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundSegment {
     /// Reply to an existing message.

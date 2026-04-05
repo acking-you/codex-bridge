@@ -75,6 +75,7 @@ Routes:
 - `GET /api/queue`
 - `POST /api/tasks/cancel`
 - `POST /api/tasks/retry-last`
+- `POST /api/reply`
 - `POST /api/messages/private`
 - `POST /api/messages/group`
 - `GET /api/events/ws`
@@ -177,23 +178,42 @@ cargo run -p codex-bridge-cli -- cancel
 cargo run -p codex-bridge-cli -- retry-last
 ```
 
+Send one skill-facing reply to the active conversation:
+
+```bash
+cargo run -p codex-bridge-cli -- reply --text "处理完成了"
+cargo run -p codex-bridge-cli -- reply --image .run/artifacts/result.png
+cargo run -p codex-bridge-cli -- reply --file .run/artifacts/report.md
+```
+
 Current behavior:
 
 - `cancel` sends a real `turn/interrupt` request to the active Codex turn and waits for the task to reach `interrupted`.
 
 ## Trigger Rules
 
-- Private chat text messages always trigger Codex work.
+- Only friends can trigger Codex through private chat.
 - Group messages trigger only when they `@` the bot.
-- Control commands: `/status`, `/queue`, `/cancel`, `/retry_last`.
+- Control commands: `/help`, `/status`, `/queue`, `/cancel`, `/retry_last`.
 - Only one Codex task runs at a time, with a bounded waiting queue behind it.
+- Private start feedback is a short in-character text reply.
+- Group start feedback is a salute emoji reaction on the triggering message.
+- Normal successful results are expected to be returned through the `reply-current` skill.
 
 ## Safety
 
-- Codex runs only inside the current project root.
+- Codex can inspect the host machine broadly, including process and port state.
 - Web search is allowed.
+- Existing files inside the current repository may be edited.
+- New files may only be created under `.run/artifacts/`.
 - `kill`, `pkill`, `killall`, `shutdown`, `reboot`, and service-stop commands are denied.
 - `thread/shellCommand` is never used.
+
+## Skills
+
+- First-party skills live under `skills/`.
+- Runtime startup ensures `.agents/skills` is a symlink to `skills/`.
+- The unified QQ result-return skill is `skills/reply-current/SKILL.md`.
 
 ## Developer Commands
 

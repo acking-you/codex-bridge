@@ -50,6 +50,10 @@ fn prepare_runtime_state_creates_artifacts_dir() {
 
     assert!(paths.runtime_root.is_dir());
     assert!(paths.artifacts_dir.is_dir());
+    assert!(paths.skills_dir.is_dir());
+    let symlink_metadata = fs::symlink_metadata(&paths.agents_skills_link).unwrap();
+    assert!(symlink_metadata.file_type().is_symlink());
+    assert_eq!(fs::read_link(&paths.agents_skills_link).unwrap(), paths.skills_dir);
     assert!(paths.config_dir.join("onebot11.json").is_file());
     let launcher_env = fs::read_to_string(&paths.launcher_env).unwrap();
     assert!(launcher_env.contains("WEBUI_TOKEN=webui"));

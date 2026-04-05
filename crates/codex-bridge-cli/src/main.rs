@@ -121,10 +121,15 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         ))
         .await?,
     );
-    let queue_capacity = config.queue_capacity;
+    let orchestrator_config = orchestrator::OrchestratorConfig {
+        queue_capacity: config.queue_capacity,
+        repo_root: project_root.clone(),
+        artifacts_dir: prepared.paths.artifacts_dir.clone(),
+        group_start_reaction_emoji_id: config.group_start_reaction_emoji_id.clone(),
+    };
     let orchestrator_task = tokio::spawn(async move {
         if let Err(error) =
-            orchestrator::run(codex_state, control_rx, codex, store, queue_capacity).await
+            orchestrator::run(codex_state, control_rx, codex, store, orchestrator_config).await
         {
             eprintln!("orchestrator stopped: {error:#}");
         }

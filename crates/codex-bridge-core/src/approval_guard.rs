@@ -14,7 +14,7 @@ pub enum ApprovalDecision {
 /// Local guard for hard safety checks before command execution.
 #[derive(Debug)]
 pub struct ApprovalGuard {
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Workspace root stays in the type for future policy expansion.")]
     workspace_root: PathBuf,
 }
 

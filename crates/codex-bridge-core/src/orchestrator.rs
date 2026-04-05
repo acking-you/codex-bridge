@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -9,10 +10,12 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use codex_app_server_protocol::TurnStatus;
 use tokio::sync::{broadcast, mpsc, Mutex};
+use uuid::Uuid;
 
 use crate::{
     codex_runtime::{ActiveTurn, CodexExecutor, CodexTurnResult},
     message_router::{CommandRequest, ControlCommand, MessageRouter, RouteDecision, TaskRequest},
+    reply_context::ActiveReplyContext,
     reply_formatter,
     scheduler::{Scheduler, TaskQueueError, TaskState},
     service::ServiceState,
@@ -27,6 +30,20 @@ pub trait ReplySink: Send + Sync {
     async fn send_private(&self, user_id: i64, text: String) -> Result<()>;
     /// Send a group message.
     async fn send_group(&self, group_id: i64, text: String) -> Result<()>;
+}
+
+/// Runtime-only configuration for reply-token issuance and group start
+/// feedback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorConfig {
+    /// Maximum number of queued tasks allowed to wait.
+    pub queue_capacity: usize,
+    /// Repository root exposed to the active reply context.
+    pub repo_root: PathBuf,
+    /// Artifact root exposed to the active reply context.
+    pub artifacts_dir: PathBuf,
+    /// QQ emoji id used for the group "salute" reaction.
+    pub group_start_reaction_emoji_id: String,
 }
 
 #[derive(Debug)]
@@ -86,7 +103,7 @@ async fn handle_command(
 ) -> Result<()> {
     let (is_group, target_id) = (command.is_group, command.reply_target_id);
     let text = match command.command {
-        ControlCommand::Help => "可用命令：/help /status /queue /cancel /retry_last".to_string(),
+        ControlCommand::Help => reply_formatter::format_help(),
         ControlCommand::Status => reply_formatter::format_status(
             scheduler.running(),
             scheduler.queue_len(),
@@ -169,8 +186,13 @@ async fn handle_task(
     scheduler
         .start_task(&task_id, &task.conversation_key, task.source_sender_id, task.source_message_id)
         .map_err(|error| anyhow!("failed to start task: {error:?}"))?;
-    send_reply(replies, task.is_group, task.reply_target_id, reply_formatter::format_started())
-        .await?;
+    send_reply(
+        replies,
+        task.is_group,
+        task.reply_target_id,
+        reply_formatter::format_started_private(),
+    )
+    .await?;
 
     let result = match codex.run_turn(&binding.thread_id, &task.source_text).await {
         Ok(result) => result,
@@ -261,7 +283,7 @@ async fn finish_failed_task(
     reply_target_id: i64,
     error_message: &str,
 ) -> Result<()> {
-    let summary = format!("执行失败。原因：{error_message}");
+    let summary = reply_formatter::format_failure(error_message);
     scheduler.finish_running(TaskState::Failed, Some(summary.clone()));
     send_reply(replies, is_group, reply_target_id, summary).await
 }
@@ -296,7 +318,7 @@ fn map_turn_state(status: &TurnStatus) -> TaskState {
 struct TaskExecutionOutcome {
     task_state: TaskState,
     summary: Option<String>,
-    final_reply: String,
+    final_reply: Option<String>,
 }
 
 #[derive(Debug)]
@@ -304,6 +326,14 @@ struct ActiveRuntimeTask {
     task: TaskRequest,
     active_turn: ActiveTurn,
     handle: tokio::task::JoinHandle<Result<TaskExecutionOutcome>>,
+}
+
+struct RuntimeTaskDeps<'a> {
+    replies: &'a dyn ReplySink,
+    state: &'a ServiceState,
+    codex: Arc<dyn CodexExecutor>,
+    state_store: Arc<Mutex<StateStore>>,
+    config: &'a OrchestratorConfig,
 }
 
 async fn execute_task_for_runtime(
@@ -321,7 +351,7 @@ async fn execute_task_for_runtime(
             return Ok(TaskExecutionOutcome {
                 task_state: TaskState::Failed,
                 summary: Some(final_reply.clone()),
-                final_reply,
+                final_reply: Some(final_reply),
             });
         },
     };
@@ -332,7 +362,11 @@ async fn execute_task_for_runtime(
     }
 
     let summary = summarize_turn_result(&result);
-    let final_reply = summary.clone().unwrap_or_else(|| "执行完成。".to_string());
+    let final_reply = if matches!(result.status, TurnStatus::Failed | TurnStatus::Interrupted) {
+        summary.clone()
+    } else {
+        None
+    };
     Ok(TaskExecutionOutcome {
         task_state: map_turn_state(&result.status),
         summary,
@@ -342,12 +376,17 @@ async fn execute_task_for_runtime(
 
 async fn start_runtime_task(
     task: TaskRequest,
-    replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    codex: Arc<dyn CodexExecutor>,
-    state_store: Arc<Mutex<StateStore>>,
+    deps: RuntimeTaskDeps<'_>,
     already_promoted: bool,
 ) -> Result<ActiveRuntimeTask> {
+    let RuntimeTaskDeps {
+        replies,
+        state,
+        codex,
+        state_store,
+        config: runtime_config,
+    } = deps;
     let binding = resolve_binding(&task, codex.as_ref(), Some(state_store.as_ref())).await?;
     let persisted_task_id = {
         let store = state_store.lock().await;
@@ -368,7 +407,7 @@ async fn start_runtime_task(
             )
             .map_err(|error| anyhow!("failed to start task: {error:?}"))?;
     }
-    send_reply(replies, task.is_group, task.reply_target_id, reply_formatter::format_started())
+    send_start_feedback(state, replies, &task, &runtime_config.group_start_reaction_emoji_id)
         .await?;
     let active_turn = match codex
         .start_turn(&binding.thread_id, &task.source_text)
@@ -381,6 +420,20 @@ async fn start_runtime_task(
             return Err(error);
         },
     };
+    let reply_token = Uuid::new_v4().to_string();
+    state
+        .activate_reply_context(ActiveReplyContext {
+            token: reply_token.clone(),
+            conversation_key: task.conversation_key.clone(),
+            is_group: task.is_group,
+            reply_target_id: task.reply_target_id,
+            source_message_id: task.source_message_id,
+            source_sender_id: task.source_sender_id,
+            source_sender_name: task.source_sender_name.clone(),
+            repo_root: runtime_config.repo_root.clone(),
+            artifacts_dir: runtime_config.artifacts_dir.clone(),
+        })
+        .await?;
     let handle = tokio::spawn(execute_task_for_runtime(
         codex,
         state_store,
@@ -428,6 +481,30 @@ async fn enqueue_runtime_task(
     }
 }
 
+async fn send_start_feedback(
+    state: &ServiceState,
+    replies: &dyn ReplySink,
+    task: &TaskRequest,
+    group_start_reaction_emoji_id: &str,
+) -> Result<()> {
+    if task.is_group {
+        state
+            .set_message_reaction(task.source_message_id, group_start_reaction_emoji_id.to_string())
+            .await
+    } else {
+        send_reply(replies, false, task.reply_target_id, reply_formatter::format_started_private())
+            .await
+    }
+}
+
+async fn private_sender_is_friend(state: &ServiceState, task: &TaskRequest) -> bool {
+    state
+        .friends()
+        .await
+        .into_iter()
+        .any(|friend| friend.user_id == task.source_sender_id)
+}
+
 async fn handle_runtime_command(
     command: CommandRequest,
     replies: &dyn ReplySink,
@@ -443,7 +520,7 @@ async fn handle_runtime_command(
                 replies,
                 command.is_group,
                 command.reply_target_id,
-                "可用命令：/help /status /queue /cancel /retry_last".to_string(),
+                reply_formatter::format_help(),
             )
             .await?;
             Ok(None)
@@ -464,10 +541,19 @@ async fn handle_runtime_command(
         },
         ControlCommand::Cancel => {
             let text = if let Some(active_task) = active_task {
-                codex
-                    .interrupt(&active_task.active_turn.thread_id, &active_task.active_turn.turn_id)
-                    .await?;
-                "已请求取消当前任务，等待任务停止。".to_string()
+                if command.source_sender_id != 0
+                    && command.source_sender_id != active_task.task.source_sender_id
+                {
+                    reply_formatter::format_cancel_denied()
+                } else {
+                    codex
+                        .interrupt(
+                            &active_task.active_turn.thread_id,
+                            &active_task.active_turn.turn_id,
+                        )
+                        .await?;
+                    reply_formatter::format_cancel_requested()
+                }
             } else {
                 "当前没有正在执行的任务。".to_string()
             };
@@ -475,15 +561,19 @@ async fn handle_runtime_command(
             Ok(None)
         },
         ControlCommand::RetryLast => {
-            let Some(task) = scheduler
-                .retry_candidate(&command.conversation_key, command.source_sender_id)
-                .and_then(|summary| retryable_tasks.get(&summary.task_id).cloned())
+            let retry_candidate = if command.source_sender_id == 0 {
+                scheduler.retry_candidate_any_owner(&command.conversation_key)
+            } else {
+                scheduler.retry_candidate(&command.conversation_key, command.source_sender_id)
+            };
+            let Some(task) =
+                retry_candidate.and_then(|summary| retryable_tasks.get(&summary.task_id).cloned())
             else {
                 send_reply(
                     replies,
                     command.is_group,
                     command.reply_target_id,
-                    "当前会话没有可重试的失败任务。".to_string(),
+                    reply_formatter::format_retry_missing(),
                 )
                 .await?;
                 return Ok(None);
@@ -505,11 +595,11 @@ pub async fn run(
     mut control_rx: mpsc::Receiver<crate::service::ServiceCommand>,
     codex: Arc<dyn CodexExecutor>,
     state_store: Arc<Mutex<StateStore>>,
-    queue_capacity: usize,
+    config: OrchestratorConfig,
 ) -> Result<()> {
     let mut event_rx = state.subscribe_events();
     let mut router = MessageRouter::new();
-    let mut scheduler = Scheduler::new(queue_capacity);
+    let mut scheduler = Scheduler::new(config.queue_capacity);
     let mut pending_tasks: VecDeque<TaskRequest> = VecDeque::new();
     let mut retryable_tasks: HashMap<String, TaskRequest> = HashMap::new();
     let mut last_retryable_conversation_key: Option<String> = None;
@@ -530,6 +620,8 @@ pub async fn run(
             }, if active_task.is_some() => {
                 let current_task = active_task.take().ok_or_else(|| anyhow!("missing active task context"))?;
                 let joined = task_result.ok_or_else(|| anyhow!("missing active task result"))?;
+                let skill_reply_count = state.current_reply_sent_count().await;
+                state.deactivate_reply_context().await?;
 
                 match joined {
                     Ok(Ok(outcome)) => {
@@ -541,13 +633,23 @@ pub async fn run(
                             );
                             last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
                         }
-                        send_reply(
-                            &replies,
-                            current_task.task.is_group,
-                            current_task.task.reply_target_id,
-                            outcome.final_reply,
-                        )
-                        .await?;
+                        if let Some(reply_text) = outcome.final_reply.or_else(|| {
+                            if matches!(outcome.task_state, TaskState::Completed)
+                                && skill_reply_count == 0
+                            {
+                                Some(reply_formatter::format_missing_skill_reply())
+                            } else {
+                                None
+                            }
+                        }) {
+                            send_reply(
+                                &replies,
+                                current_task.task.is_group,
+                                current_task.task.reply_target_id,
+                                reply_text,
+                            )
+                            .await?;
+                        }
                     },
                     Ok(Err(error)) => {
                         let message = format!("执行失败。原因：{error}");
@@ -590,10 +692,14 @@ pub async fn run(
                     active_task = Some(
                         start_runtime_task(
                             next_task,
-                            &replies,
                             &mut scheduler,
-                            codex.clone(),
-                            state_store.clone(),
+                            RuntimeTaskDeps {
+                                replies: &replies,
+                                state: &state,
+                                codex: codex.clone(),
+                                state_store: state_store.clone(),
+                                config: &config,
+                            },
                             true,
                         )
                         .await?,
@@ -619,10 +725,14 @@ pub async fn run(
                                         active_task = Some(
                                             start_runtime_task(
                                                 task,
-                                                &replies,
                                                 &mut scheduler,
-                                                codex.clone(),
-                                                state_store.clone(),
+                                                RuntimeTaskDeps {
+                                                    replies: &replies,
+                                                    state: &state,
+                                                    codex: codex.clone(),
+                                                    state_store: state_store.clone(),
+                                                    config: &config,
+                                                },
                                                 false,
                                             )
                                             .await?,
@@ -630,16 +740,28 @@ pub async fn run(
                                     }
                                 },
                                 RouteDecision::Task(task) => {
-                                    if active_task.is_some() {
+                                    if !task.is_group && !private_sender_is_friend(&state, &task).await {
+                                        send_reply(
+                                            &replies,
+                                            false,
+                                            task.reply_target_id,
+                                            reply_formatter::format_friend_gate(),
+                                        )
+                                        .await?;
+                                    } else if active_task.is_some() {
                                         enqueue_runtime_task(task, &replies, &mut scheduler, &mut pending_tasks).await?;
                                     } else {
                                         active_task = Some(
                                             start_runtime_task(
                                                 task,
-                                                &replies,
                                                 &mut scheduler,
-                                                codex.clone(),
-                                                state_store.clone(),
+                                                RuntimeTaskDeps {
+                                                    replies: &replies,
+                                                    state: &state,
+                                                    codex: codex.clone(),
+                                                    state_store: state_store.clone(),
+                                                    config: &config,
+                                                },
                                                 false,
                                             )
                                             .await?,
@@ -673,10 +795,14 @@ pub async fn run(
                     active_task = Some(
                         start_runtime_task(
                             task,
-                            &replies,
                             &mut scheduler,
-                            codex.clone(),
-                            state_store.clone(),
+                            RuntimeTaskDeps {
+                                replies: &replies,
+                                state: &state,
+                                codex: codex.clone(),
+                                state_store: state_store.clone(),
+                                config: &config,
+                            },
                             false,
                         )
                         .await?,
