@@ -1,6 +1,7 @@
 //! NapCat transport frame tests.
 
 use qqbot_core::napcat::{build_action_frame, IncomingFrame};
+use qqbot_core::events::NormalizedEvent;
 
 #[test]
 fn build_action_frame_includes_action_params_and_echo() {
@@ -49,7 +50,15 @@ fn incoming_frame_from_value_distinguishes_event_and_response() {
     let event_frame = IncomingFrame::from_value(event_payload).expect("parse event frame");
     let response_frame = IncomingFrame::from_value(response_payload).expect("parse response frame");
 
-    matches!(event_frame, IncomingFrame::Event(_));
+    match event_frame {
+        IncomingFrame::Event(NormalizedEvent::PrivateMessageReceived(event)) => {
+            assert_eq!(event.message_id, 42);
+            assert_eq!(event.sender_name, "alice");
+        },
+        IncomingFrame::Event(_) | IncomingFrame::Response { .. } => {
+            panic!("expected event");
+        },
+    }
     match response_frame {
         IncomingFrame::Response {
             echo,
