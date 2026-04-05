@@ -39,11 +39,24 @@ pub struct TaskRequest {
     pub reply_target_id: i64,
 }
 
+/// Request object carrying metadata for command execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRequest {
+    /// Control command.
+    pub command: ControlCommand,
+    /// Stable conversation key for queueing and deduping.
+    pub conversation_key: String,
+    /// Conversation id for response routing.
+    pub reply_target_id: i64,
+    /// Indicates whether the source was a group chat.
+    pub is_group: bool,
+}
+
 /// Routing decision for an incoming message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecision {
     /// Execute a local control command.
-    Command(ControlCommand),
+    Command(CommandRequest),
     /// Dispatch message to queue/worker.
     Task(TaskRequest),
 }
@@ -145,7 +158,12 @@ impl MessageRouter {
         }
 
         if let Some(command) = parse_command(source_text) {
-            return Some(RouteDecision::Command(command));
+            return Some(RouteDecision::Command(CommandRequest {
+                command,
+                conversation_key: format!("private:{}", event.sender_id),
+                reply_target_id: event.sender_id,
+                is_group: false,
+            }));
         }
 
         Some(RouteDecision::Task(TaskRequest {
@@ -173,7 +191,12 @@ impl MessageRouter {
         }
 
         if let Some(command) = parse_command(source_text) {
-            return Some(RouteDecision::Command(command));
+            return Some(RouteDecision::Command(CommandRequest {
+                command,
+                conversation_key: format!("group:{}", event.group_id),
+                reply_target_id: event.group_id,
+                is_group: true,
+            }));
         }
 
         Some(RouteDecision::Task(TaskRequest {
@@ -195,11 +218,5 @@ fn parse_command(text: &str) -> Option<ControlCommand> {
         Some("/cancel") => Some(ControlCommand::Cancel),
         Some("/retry_last") => Some(ControlCommand::RetryLast),
         _ => None,
-    }
-}
-
-impl From<ControlCommand> for RouteDecision {
-    fn from(command: ControlCommand) -> Self {
-        RouteDecision::Command(command)
     }
 }

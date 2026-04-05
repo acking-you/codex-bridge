@@ -116,32 +116,57 @@ pub async fn run_bridge_loop(
     }
 
     let event_state = state.clone();
-    tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            event_state.publish_event(event);
-        }
-    });
-
-    while let Some(command) = command_rx.recv().await {
-        match command {
-            ServiceCommand::SendPrivate {
-                user_id,
-                text,
-                respond_to,
-            } => {
-                let _ = respond_to.send(client.send_private_message(user_id, text).await);
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(event) => {
+                        event_state.publish_event(event);
+                    },
+                    None => {
+                        let previous = state.session().await;
+                        state.set_session(SessionSnapshot {
+                            status: SessionStatus::Disconnected,
+                            self_id: previous.self_id,
+                            nickname: previous.nickname,
+                            qq_pid: previous.qq_pid,
+                        }).await;
+                        return Ok(());
+                    },
+                }
             },
-            ServiceCommand::SendGroup {
-                group_id,
-                text,
-                respond_to,
-            } => {
-                let _ = respond_to.send(client.send_group_message(group_id, text).await);
+            command = command_rx.recv() => {
+                match command {
+                    Some(command) => match command {
+                        ServiceCommand::SendPrivate {
+                            user_id,
+                            text,
+                            respond_to,
+                        } => {
+                            let _ = respond_to.send(client.send_private_message(user_id, text).await);
+                        },
+                        ServiceCommand::SendGroup {
+                            group_id,
+                            text,
+                            respond_to,
+                        } => {
+                            let _ = respond_to.send(client.send_group_message(group_id, text).await);
+                        },
+                    },
+                    None => {
+                        let previous = state.session().await;
+                        state.set_session(SessionSnapshot {
+                            status: SessionStatus::Disconnected,
+                            self_id: previous.self_id,
+                            nickname: previous.nickname,
+                            qq_pid: previous.qq_pid,
+                        }).await;
+                        return Ok(());
+                    },
+                }
             },
         }
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone)]

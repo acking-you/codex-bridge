@@ -2,7 +2,9 @@
 
 use qqbot_core::{
     events::NormalizedEvent,
-    napcat::message_router::{ControlCommand, MessageDeduper, MessageRouter, RouteDecision},
+    napcat::message_router::{
+        CommandRequest, ControlCommand, MessageDeduper, MessageRouter, RouteDecision,
+    },
 };
 
 #[test]
@@ -63,7 +65,47 @@ fn group_mention_status_routes_to_command() {
 
     let decision = router.route_event(event).expect("route decision");
 
-    assert_eq!(decision, RouteDecision::Command(ControlCommand::Status));
+    assert_eq!(
+        decision,
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Status,
+            conversation_key: "group:777".to_string(),
+            reply_target_id: 777,
+            is_group: true,
+        })
+    );
+}
+
+#[test]
+fn private_status_command_has_context() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 1004,
+        "user_id": 11,
+        "self_id": 99,
+        "raw_message": "/status",
+        "message": [
+            { "type": "text", "data": { "text": " /status" } }
+        ],
+        "sender": {
+            "nickname": "alice"
+        }
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize private message");
+    let mut router = MessageRouter::new();
+
+    let decision = router.route_event(event).expect("route decision");
+
+    assert_eq!(
+        decision,
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Status,
+            conversation_key: "private:11".to_string(),
+            reply_target_id: 11,
+            is_group: false,
+        })
+    );
 }
 
 #[test]
