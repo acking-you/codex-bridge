@@ -18,5 +18,11 @@ pub mod launcher;
 /// Filesystem path helpers for launcher/runtime state.
 pub mod runtime;
 
+/// SQLite-backed runtime state storage.
+pub mod state_store;
+
+/// Versioned system prompt constants.
+pub mod system_prompt;
+
 /// Shared in-memory service state for the bridge runtime.
 pub mod service;
