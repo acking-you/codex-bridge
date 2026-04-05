@@ -21,6 +21,9 @@ pub mod launcher;
 /// Filesystem path helpers for launcher/runtime state.
 pub mod runtime;
 
+/// Filesystem permission shaping for codex runtime writes.
+pub mod workspace_guard;
+
 /// SQLite-backed runtime state storage.
 pub mod state_store;
 

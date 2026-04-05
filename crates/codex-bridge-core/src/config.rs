@@ -17,6 +17,8 @@ pub struct RuntimeConfig {
     pub websocket_port: u16,
     /// Maximum number of queued Codex tasks.
     pub queue_capacity: usize,
+    /// Emoji-like identifier used for the group "salute" start reaction.
+    pub group_start_reaction_emoji_id: String,
     /// Optional QQ executable override.
     pub qq_executable: Option<PathBuf>,
 }
@@ -30,6 +32,7 @@ impl Default for RuntimeConfig {
             websocket_host: "127.0.0.1".to_string(),
             websocket_port: 3012,
             queue_capacity: 5,
+            group_start_reaction_emoji_id: "282".to_string(),
             qq_executable: None,
         }
     }

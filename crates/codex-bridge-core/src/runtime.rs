@@ -30,6 +30,8 @@ pub struct RuntimePaths {
     pub napcat_repo_root: PathBuf,
     /// Root runtime directory.
     pub runtime_root: PathBuf,
+    /// Writable artifact directory for codex-created outputs.
+    pub artifacts_dir: PathBuf,
     /// Runtime config directory.
     pub config_dir: PathBuf,
     /// Runtime log directory.
@@ -42,6 +44,14 @@ pub struct RuntimePaths {
     pub database_path: PathBuf,
     /// Environment file containing generated tokens.
     pub launcher_env: PathBuf,
+    /// Runtime reply-context file for skill-facing reply commands.
+    pub reply_context_file: PathBuf,
+    /// First-party skills directory.
+    pub skills_dir: PathBuf,
+    /// Root `.agents` directory.
+    pub agents_dir: PathBuf,
+    /// `.agents/skills` symlink target path.
+    pub agents_skills_link: PathBuf,
     /// Base QQ installation directory.
     pub qq_base: PathBuf,
     /// QQ executable path.
@@ -64,8 +74,8 @@ impl RuntimePaths {
     /// Build the runtime path set relative to the Rust project root.
     pub fn new(project_root: &Path, qq_executable: Option<PathBuf>) -> Self {
         let runtime_root = project_root.join(".run/default");
-        let napcat_repo_root = project_root.join("deps/NapCatQQ");
         let run_dir = runtime_root.join("run");
+        let napcat_repo_root = project_root.join("deps/NapCatQQ");
         let qq_executable = qq_executable.unwrap_or_else(default_qq_executable);
         let qq_base = qq_executable
             .parent()
@@ -76,11 +86,16 @@ impl RuntimePaths {
             project_root: project_root.to_path_buf(),
             napcat_repo_root: napcat_repo_root.clone(),
             runtime_root: runtime_root.clone(),
+            artifacts_dir: project_root.join(".run/artifacts"),
             config_dir: runtime_root.join("config"),
             logs_dir: runtime_root.join("logs"),
             cache_dir: runtime_root.join("cache"),
             database_path: runtime_root.join("state.sqlite3"),
             launcher_env: run_dir.join("launcher.env"),
+            reply_context_file: run_dir.join("reply_context.json"),
+            skills_dir: project_root.join("skills"),
+            agents_dir: project_root.join(".agents"),
+            agents_skills_link: project_root.join(".agents/skills"),
             run_dir,
             qq_base,
             qq_executable,
@@ -110,6 +125,7 @@ where
     fs::create_dir_all(&paths.logs_dir)?;
     fs::create_dir_all(&paths.cache_dir)?;
     fs::create_dir_all(&paths.run_dir)?;
+    fs::create_dir_all(&paths.artifacts_dir)?;
     if let Some(parent) = paths.database_path.parent() {
         fs::create_dir_all(parent)?;
     }
