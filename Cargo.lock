@@ -2126,6 +2126,7 @@ dependencies = [
  "async-trait",
  "axum",
  "codex-app-server-protocol",
+ "codex-utils-absolute-path",
  "futures-util",
  "reqwest",
  "rusqlite",

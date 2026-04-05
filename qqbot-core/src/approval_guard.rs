@@ -44,6 +44,17 @@ impl ApprovalGuard {
 
         ApprovalDecision::Allow
     }
+
+    /// Review a file-change approval request.
+    pub fn review_file_change(&self, grant_root: Option<&Path>) -> ApprovalDecision {
+        match grant_root {
+            Some(root) => ApprovalDecision::Deny(format!(
+                "denied extra write root request: {}",
+                root.display()
+            )),
+            None => ApprovalDecision::Allow,
+        }
+    }
 }
 
 fn command_is_dangerous(command: &str) -> bool {
@@ -61,11 +72,10 @@ fn command_is_dangerous(command: &str) -> bool {
             continue;
         }
 
-        if token == "systemctl" {
-            if matches!(tokens.get(idx + 1).map(String::as_str), Some("stop" | "restart" | "kill"))
-            {
-                return true;
-            }
+        if token == "systemctl"
+            && matches!(tokens.get(idx + 1).map(String::as_str), Some("stop" | "restart" | "kill"))
+        {
+            return true;
         }
 
         if is_dangerous_simple_command(token) {

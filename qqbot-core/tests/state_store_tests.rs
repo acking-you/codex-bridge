@@ -128,7 +128,7 @@ fn system_prompt_same_version_with_different_text_fails() {
 
     let conn = Connection::open(&path).expect("open sqlite db");
     conn.execute("UPDATE system_prompt_versions SET prompt_text = ?1 WHERE version = ?2", [
-        &"corrupted prompt",
+        "corrupted prompt",
         SYSTEM_PROMPT_VERSION,
     ])
     .expect("corrupt prompt text");

@@ -6,6 +6,7 @@ members = ["qqbot-core", "qqbot-cli"]
 anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
 codex-app-server-protocol = { path = "/home/ts_user/rust_pro/codex/codex-rs/app-server-protocol" }
+codex-utils-absolute-path = { path = "/home/ts_user/rust_pro/codex/codex-rs/utils/absolute-path" }
 clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
 futures-util = "0.3"

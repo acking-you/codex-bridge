@@ -120,17 +120,9 @@ impl Default for MessageDeduper {
 }
 
 /// Router for normalized OneBot messages.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct MessageRouter {
     deduper: MessageDeduper,
-}
-
-impl Default for MessageRouter {
-    fn default() -> Self {
-        Self {
-            deduper: MessageDeduper::default(),
-        }
-    }
 }
 
 impl MessageRouter {

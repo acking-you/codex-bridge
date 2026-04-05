@@ -8,12 +8,14 @@ use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, ClientInfo, ClientNotification, ClientRequest,
     CommandExecutionApprovalDecision, CommandExecutionRequestApprovalParams,
     CommandExecutionRequestApprovalResponse, FileChangeApprovalDecision,
-    FileChangeRequestApprovalResponse, InitializeCapabilities, InitializeParams,
-    InitializeResponse, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
-    ReadOnlyAccess, RequestId, SandboxMode, SandboxPolicy, ServerNotification, ServerRequest,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, UserInput,
+    FileChangeRequestApprovalParams, FileChangeRequestApprovalResponse, InitializeCapabilities,
+    InitializeParams, InitializeResponse, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
+    JSONRPCResponse, ReadOnlyAccess, RequestId, SandboxMode, SandboxPolicy, ServerNotification,
+    ServerRequest, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, Turn, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse, TurnStatus, UserInput,
 };
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
@@ -64,16 +66,26 @@ struct RuntimeProtocolState {
 }
 
 /// Final outcome returned from a codex turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CodexTurnResult {
     /// Thread id used by the runtime.
     pub thread_id: String,
     /// Turn id returned by `turn/start`.
     pub turn_id: String,
+    /// Terminal turn status reported by the app-server.
+    pub status: TurnStatus,
+    /// Terminal error message when the turn fails.
+    pub error_message: Option<String>,
     /// Raw completed items emitted by the runtime for this turn.
     pub items: Vec<Value>,
     /// Last assistant/agent text message, if one exists.
     pub final_reply: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TurnCompletion {
+    turn: Turn,
+    items: Vec<Value>,
 }
 
 /// Minimal interface for codex execution runtimes.
@@ -208,12 +220,14 @@ impl CodexRuntime {
                 state.write_response(request_id, response).await?;
             },
             ServerRequest::FileChangeRequestApproval {
-                request_id, ..
+                request_id,
+                params,
             } => {
                 state
-                    .write_response(request_id, FileChangeRequestApprovalResponse {
-                        decision: FileChangeApprovalDecision::Accept,
-                    })
+                    .write_response(
+                        request_id,
+                        build_file_change_approval_response(&self.guard, &params),
+                    )
                     .await?;
             },
             other => {
@@ -228,7 +242,7 @@ impl CodexRuntime {
         state: &mut RuntimeProtocolState,
         thread_id: &str,
         turn_id: &str,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<TurnCompletion> {
         let mut items = Vec::new();
         loop {
             let message = if let Some(notification) = state.pending_notifications.pop_front() {
@@ -254,7 +268,10 @@ impl CodexRuntime {
                         ServerNotification::TurnCompleted(payload)
                             if payload.thread_id == thread_id && payload.turn.id == turn_id =>
                         {
-                            break;
+                            return Ok(TurnCompletion {
+                                turn: payload.turn,
+                                items,
+                            });
                         },
                         _ => {},
                     }
@@ -265,7 +282,6 @@ impl CodexRuntime {
                 JSONRPCMessage::Response(_) | JSONRPCMessage::Error(_) => {},
             }
         }
-        Ok(items)
     }
 
     async fn next_request_id(&self) -> RequestId {
@@ -288,15 +304,7 @@ impl CodexExecutor for CodexRuntime {
                 let request_id = self.next_request_id().await;
                 let request = ClientRequest::ThreadResume {
                     request_id: request_id.clone(),
-                    params: ThreadResumeParams {
-                        thread_id: thread_id.to_string(),
-                        cwd: Some(self.config.workspace_root.to_string_lossy().into_owned()),
-                        approval_policy: Some(default_approval_policy()),
-                        approvals_reviewer: Some(ApprovalsReviewer::User),
-                        sandbox: Some(SandboxMode::WorkspaceWrite),
-                        developer_instructions: Some(SYSTEM_PROMPT_TEXT.to_string()),
-                        ..Default::default()
-                    },
+                    params: build_thread_resume_params(&self.config, thread_id),
                 };
                 let response: ThreadResumeResponse = self
                     .send_request(request, request_id, "thread/resume")
@@ -307,16 +315,7 @@ impl CodexExecutor for CodexRuntime {
                 let request_id = self.next_request_id().await;
                 let request = ClientRequest::ThreadStart {
                     request_id: request_id.clone(),
-                    params: ThreadStartParams {
-                        cwd: Some(self.config.workspace_root.to_string_lossy().into_owned()),
-                        approval_policy: Some(default_approval_policy()),
-                        approvals_reviewer: Some(ApprovalsReviewer::User),
-                        sandbox: Some(SandboxMode::WorkspaceWrite),
-                        service_name: (!conversation_key.is_empty())
-                            .then(|| conversation_key.to_string()),
-                        developer_instructions: Some(SYSTEM_PROMPT_TEXT.to_string()),
-                        ..Default::default()
-                    },
+                    params: build_thread_start_params(&self.config, conversation_key),
                 };
                 let response: ThreadStartResponse = self
                     .send_request(request, request_id, "thread/start")
@@ -336,15 +335,22 @@ impl CodexExecutor for CodexRuntime {
             self.send_request(request, request_id, "turn/start").await?;
 
         let mut state = self.state.lock().await;
-        let items = self
+        let completion = self
             .wait_for_turn_completion(&mut state, thread_id, &response.turn.id)
             .await?;
-        let final_reply = extract_final_reply(&items);
+        let final_reply = summarize_turn_result(&completion.turn, &completion.items);
+        let error_message = completion
+            .turn
+            .error
+            .as_ref()
+            .map(|error| error.message.clone());
 
         Ok(CodexTurnResult {
             thread_id: thread_id.to_string(),
             turn_id: response.turn.id,
-            items,
+            status: completion.turn.status.clone(),
+            error_message,
+            items: completion.items,
             final_reply,
         })
     }
@@ -448,6 +454,39 @@ impl Drop for RuntimeProtocolState {
     }
 }
 
+/// Build `thread/start` params for a new long-lived QQ conversation thread.
+pub fn build_thread_start_params(
+    config: &CodexRuntimeConfig,
+    conversation_key: &str,
+) -> ThreadStartParams {
+    ThreadStartParams {
+        cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
+        approval_policy: Some(default_approval_policy()),
+        approvals_reviewer: Some(ApprovalsReviewer::User),
+        sandbox: Some(SandboxMode::WorkspaceWrite),
+        service_name: (!conversation_key.is_empty()).then(|| conversation_key.to_string()),
+        developer_instructions: Some(SYSTEM_PROMPT_TEXT.to_string()),
+        persist_extended_history: true,
+        ..Default::default()
+    }
+}
+
+/// Build `thread/resume` params without mutating the existing prompt version.
+pub fn build_thread_resume_params(
+    config: &CodexRuntimeConfig,
+    thread_id: &str,
+) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id: thread_id.to_string(),
+        cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
+        approval_policy: Some(default_approval_policy()),
+        approvals_reviewer: Some(ApprovalsReviewer::User),
+        sandbox: Some(SandboxMode::WorkspaceWrite),
+        persist_extended_history: true,
+        ..Default::default()
+    }
+}
+
 /// Build `turn/start` params using the QQ bot's fixed safety policy.
 pub fn build_turn_start_params(
     config: &CodexRuntimeConfig,
@@ -463,7 +502,7 @@ pub fn build_turn_start_params(
         cwd: Some(config.workspace_root.clone()),
         approval_policy: Some(default_approval_policy()),
         approvals_reviewer: Some(ApprovalsReviewer::User),
-        sandbox_policy: Some(default_sandbox_policy()),
+        sandbox_policy: Some(default_sandbox_policy(&config.workspace_root)),
         ..Default::default()
     }
 }
@@ -481,6 +520,24 @@ pub fn extract_final_reply(items: &[Value]) -> Option<String> {
     items.iter().rev().find_map(extract_message_text)
 }
 
+/// Summarize a terminal turn into the QQ-facing reply text.
+pub fn summarize_turn_result(turn: &Turn, items: &[Value]) -> Option<String> {
+    if let Some(reply) = extract_final_reply(items) {
+        return Some(reply);
+    }
+
+    match turn.status {
+        TurnStatus::Failed => Some(match turn.error.as_ref() {
+            Some(error) => format!("执行失败。\n原因：{}", error.message),
+            None => "执行失败。".to_string(),
+        }),
+        TurnStatus::Interrupted => {
+            Some("任务因服务重启或异常中断。可使用 /retry_last 重试。".to_string())
+        },
+        TurnStatus::Completed | TurnStatus::InProgress => None,
+    }
+}
+
 fn client_request_to_jsonrpc(request: ClientRequest) -> Result<JSONRPCRequest> {
     let value = serde_json::to_value(request).context("serialize client request")?;
     serde_json::from_value(value).context("convert client request to json-rpc")
@@ -496,9 +553,10 @@ fn default_approval_policy() -> AskForApproval {
     }
 }
 
-fn default_sandbox_policy() -> SandboxPolicy {
+fn default_sandbox_policy(workspace_root: &PathBuf) -> SandboxPolicy {
     SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![],
+        writable_roots: vec![AbsolutePathBuf::from_absolute_path(workspace_root)
+            .expect("workspace root must be absolute")],
         read_only_access: ReadOnlyAccess::FullAccess,
         network_access: true,
         exclude_tmpdir_env_var: false,
@@ -506,10 +564,17 @@ fn default_sandbox_policy() -> SandboxPolicy {
     }
 }
 
-fn build_command_approval_response(
+/// Build the command-approval response under the local workspace policy.
+pub fn build_command_approval_response(
     guard: &ApprovalGuard,
     params: &CommandExecutionRequestApprovalParams,
 ) -> CommandExecutionRequestApprovalResponse {
+    if requests_additional_permissions(params) {
+        return CommandExecutionRequestApprovalResponse {
+            decision: CommandExecutionApprovalDecision::Decline,
+        };
+    }
+
     let command = params.command.as_deref().unwrap_or_default();
     let cwd = params
         .cwd
@@ -525,6 +590,32 @@ fn build_command_approval_response(
     CommandExecutionRequestApprovalResponse {
         decision,
     }
+}
+
+/// Build the file-change approval response under the local workspace policy.
+pub fn build_file_change_approval_response(
+    guard: &ApprovalGuard,
+    params: &FileChangeRequestApprovalParams,
+) -> FileChangeRequestApprovalResponse {
+    let decision = match guard.review_file_change(params.grant_root.as_deref()) {
+        ApprovalDecision::Allow => FileChangeApprovalDecision::Accept,
+        ApprovalDecision::Deny(_) => FileChangeApprovalDecision::Decline,
+    };
+
+    FileChangeRequestApprovalResponse {
+        decision,
+    }
+}
+
+fn requests_additional_permissions(params: &CommandExecutionRequestApprovalParams) -> bool {
+    params.additional_permissions.is_some()
+        || params.network_approval_context.is_some()
+        || params.skill_metadata.is_some()
+        || params.proposed_execpolicy_amendment.is_some()
+        || params
+            .proposed_network_policy_amendments
+            .as_ref()
+            .is_some_and(|amendments| !amendments.is_empty())
 }
 
 fn extract_message_text(item: &Value) -> Option<String> {

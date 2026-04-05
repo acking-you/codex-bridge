@@ -11,6 +11,7 @@ workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 codex-app-server-protocol = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
