@@ -26,3 +26,9 @@ pub mod system_prompt;
 
 /// Shared in-memory service state for the bridge runtime.
 pub mod service;
+
+/// Single-task scheduling primitives.
+pub mod scheduler;
+
+/// Reply formatting helpers for QQ-facing user responses.
+pub mod reply_formatter;

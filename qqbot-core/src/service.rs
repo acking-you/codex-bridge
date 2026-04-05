@@ -35,6 +35,23 @@ pub struct SessionSnapshot {
     pub qq_pid: Option<u32>,
 }
 
+/// Cached runtime snapshot used by API/status endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TaskSnapshot {
+    /// Running task identifier, if any.
+    pub running_task_id: Option<String>,
+    /// Conversation key for the running task.
+    pub running_conversation_key: Option<String>,
+    /// Summary of the running task if it has completed.
+    pub running_summary: Option<String>,
+    /// Current number of tasks waiting in queue.
+    pub queue_len: usize,
+    /// Summary from the most recent terminal task.
+    pub last_terminal_summary: Option<String>,
+    /// Active system prompt version, if available.
+    pub prompt_version: Option<String>,
+}
+
 impl Default for SessionSnapshot {
     fn default() -> Self {
         Self {
@@ -101,6 +118,7 @@ struct ServiceInner {
     session: RwLock<SessionSnapshot>,
     friends: RwLock<Vec<FriendProfile>>,
     groups: RwLock<Vec<GroupProfile>>,
+    task_snapshot: RwLock<TaskSnapshot>,
     events_tx: broadcast::Sender<NormalizedEvent>,
     command_tx: mpsc::Sender<ServiceCommand>,
 }
@@ -120,6 +138,7 @@ impl ServiceState {
                 session: RwLock::new(SessionSnapshot::default()),
                 friends: RwLock::new(Vec::new()),
                 groups: RwLock::new(Vec::new()),
+                task_snapshot: RwLock::new(TaskSnapshot::default()),
                 events_tx,
                 command_tx,
             }),
@@ -184,6 +203,16 @@ impl ServiceState {
     /// Read the cached group list.
     pub async fn groups(&self) -> Vec<GroupProfile> {
         self.inner.groups.read().await.clone()
+    }
+
+    /// Replace the current task snapshot.
+    pub async fn set_task_snapshot(&self, snapshot: TaskSnapshot) {
+        *self.inner.task_snapshot.write().await = snapshot;
+    }
+
+    /// Read the current task snapshot.
+    pub async fn task_snapshot(&self) -> TaskSnapshot {
+        self.inner.task_snapshot.read().await.clone()
     }
 
     /// Publish a normalized event to local websocket subscribers.
