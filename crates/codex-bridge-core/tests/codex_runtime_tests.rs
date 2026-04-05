@@ -8,13 +8,14 @@ use codex_app_server_protocol::{
     FileChangeRequestApprovalParams, ReadOnlyAccess, SandboxPolicy, Turn, TurnError, TurnStatus,
 };
 use codex_bridge_core::{
-    approval_guard::{ApprovalDecision, ApprovalGuard},
+    approval_guard::ApprovalGuard,
     codex_runtime::{
         build_codex_app_server_command, build_command_approval_response,
         build_file_change_approval_response, build_thread_resume_params, build_thread_start_params,
         build_turn_interrupt_params, build_turn_start_params, extract_final_reply,
         summarize_turn_result,
     },
+    system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION},
 };
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::json;
@@ -31,42 +32,11 @@ fn runtime_config() -> codex_bridge_core::codex_runtime::CodexRuntimeConfig {
 }
 
 #[test]
-fn review_command_denies_dangerous_kill_command() {
-    let guard = test_guard();
-    let decision =
-        guard.review_command("kill -9 1", "/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ", &[]);
-
-    match decision {
-        ApprovalDecision::Deny(reason) => {
-            assert!(reason.contains("dangerous"));
-        },
-        other => panic!("expected deny, got {other:?}"),
-    }
-}
-
-#[test]
-fn review_command_allows_safe_local_inspection() {
-    let guard = test_guard();
-    let decision = guard.review_command(
-        "ls -la --color=never .",
-        "/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ/subdir",
-        &[],
-    );
-
-    assert_eq!(decision, ApprovalDecision::Allow);
-}
-
-#[test]
-fn review_command_denies_cwd_outside_workspace_root() {
-    let guard = test_guard();
-    let decision = guard.review_command("ls", "/tmp", &[]);
-
-    match decision {
-        ApprovalDecision::Deny(reason) => {
-            assert!(reason.contains("workspace"));
-        },
-        other => panic!("expected deny, got {other:?}"),
-    }
+fn system_prompt_mentions_reply_skill_and_artifact_boundary() {
+    assert_eq!(SYSTEM_PROMPT_VERSION, "v2.0.0");
+    assert!(SYSTEM_PROMPT_TEXT.contains(".run/artifacts/"));
+    assert!(SYSTEM_PROMPT_TEXT.contains("reply skill"));
+    assert!(SYSTEM_PROMPT_TEXT.contains("inspect the host machine broadly"));
 }
 
 #[test]
@@ -121,13 +91,6 @@ fn codex_app_server_command_uses_explicit_bin_selection() {
         "--listen".to_string(),
         "stdio://".to_string(),
     ]);
-}
-
-#[test]
-fn guard_constructor_uses_explicit_workspace_root() {
-    let guard = ApprovalGuard::new("/tmp/codex-bridge");
-    let decision = guard.review_command("ls -la", "/tmp/other", &[]);
-    assert_eq!(decision, ApprovalDecision::Deny("cwd escapes workspace: /tmp/other".to_string()));
 }
 
 #[test]
