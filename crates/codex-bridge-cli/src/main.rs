@@ -1,6 +1,10 @@
 //! Binary entrypoint for Codex Bridge.
 
-use std::{env, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -100,7 +104,11 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     let codex_state = state.clone();
     let store = Arc::new(Mutex::new(StateStore::open(&prepared.paths.database_path)?));
     let codex = Arc::new(
-        CodexRuntime::new(CodexRuntimeConfig::new(codex_repo_root(), project_root.clone())).await?,
+        CodexRuntime::new(CodexRuntimeConfig::new(
+            codex_repo_root(&project_root),
+            project_root.clone(),
+        ))
+        .await?,
     );
     let queue_capacity = config.queue_capacity;
     tokio::spawn(async move {
@@ -116,16 +124,19 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
 
 fn project_root() -> Result<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(project_root) = manifest_dir.parent() else {
-        anyhow::bail!("failed to derive project root from {}", manifest_dir.display());
+    let Some(parent) = manifest_dir.parent() else {
+        anyhow::bail!("failed to derive crates directory from {}", manifest_dir.display());
+    };
+    let Some(project_root) = parent.parent() else {
+        anyhow::bail!("failed to derive project root from {}", parent.display());
     };
     Ok(project_root.to_path_buf())
 }
 
-fn codex_repo_root() -> PathBuf {
+fn codex_repo_root(project_root: &Path) -> PathBuf {
     env::var_os("CODEX_REPO_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/ts_user/rust_pro/codex/codex-rs"))
+        .unwrap_or_else(|| project_root.join("deps/codex/codex-rs"))
 }
 
 async fn get_local_json(config: &RuntimeConfig, path: &str) -> Result<Value> {

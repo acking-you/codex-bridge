@@ -1,12 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["crates/codex-bridge-core", "crates/codex-bridge-cli"]
+exclude = ["deps/NapCatQQ", "deps/codex/codex-rs"]
 
 [workspace.dependencies]
 anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
-codex-app-server-protocol = { path = "/home/ts_user/rust_pro/codex/codex-rs/app-server-protocol" }
-codex-utils-absolute-path = { path = "/home/ts_user/rust_pro/codex/codex-rs/utils/absolute-path" }
+codex-app-server-protocol = { path = "deps/codex/codex-rs/app-server-protocol" }
+codex-utils-absolute-path = { path = "deps/codex/codex-rs/utils/absolute-path" }
 clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
 futures-util = "0.3"

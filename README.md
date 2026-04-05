@@ -1,6 +1,7 @@
 # Codex Bridge
 
-`codex-bridge` is a Linux-only Rust bridge around desktop QQ.
+`codex-bridge` is a Linux-first Rust bridge built around `codex app-server`.
+The current transport is desktop QQ through the NapCat runtime.
 
 It does three things:
 
@@ -36,7 +37,7 @@ missing, the launcher installs Linux QQ automatically.
 
 ```bash
 cd codex-bridge
-cargo run -p codex-bridge -- run
+cargo run -p codex-bridge-cli -- run
 ```
 
 What happens:
@@ -48,6 +49,13 @@ What happens:
 5. the terminal prints QQ/NapCat logs and the text QR code,
 6. a local `codex app-server` child is started over `stdio`,
 7. after you scan the QR code, the local API becomes usable.
+
+## Repository Layout
+
+- `crates/codex-bridge-core`: runtime, orchestrator, state store, and local API
+- `crates/codex-bridge-cli`: CLI entrypoint
+- `deps/NapCatQQ`: pinned NapCat source fork used to build and launch the QQ transport
+- `deps/codex`: pinned Codex source fork used for `codex app-server` dependencies
 
 ## Local API
 
@@ -133,40 +141,40 @@ Restart behavior:
 Start the bridge:
 
 ```bash
-cargo run -p codex-bridge -- run
+cargo run -p codex-bridge-cli -- run
 ```
 
 Send a private message through the running bridge:
 
 ```bash
-cargo run -p codex-bridge -- send-private --user-id 2394626220 --text "hello"
+cargo run -p codex-bridge-cli -- send-private --user-id 2394626220 --text "hello"
 ```
 
 Send a group message through the running bridge:
 
 ```bash
-cargo run -p codex-bridge -- send-group --group-id 123456 --text "hello group"
+cargo run -p codex-bridge-cli -- send-group --group-id 123456 --text "hello group"
 ```
 
 Query cached contacts:
 
 ```bash
-cargo run -p codex-bridge -- friends
-cargo run -p codex-bridge -- groups
+cargo run -p codex-bridge-cli -- friends
+cargo run -p codex-bridge-cli -- groups
 ```
 
 Query the current orchestrator state:
 
 ```bash
-cargo run -p codex-bridge -- status
-cargo run -p codex-bridge -- queue
+cargo run -p codex-bridge-cli -- status
+cargo run -p codex-bridge-cli -- queue
 ```
 
 Send local control commands:
 
 ```bash
-cargo run -p codex-bridge -- cancel
-cargo run -p codex-bridge -- retry-last
+cargo run -p codex-bridge-cli -- cancel
+cargo run -p codex-bridge-cli -- retry-last
 ```
 
 Current behavior:

@@ -4,7 +4,11 @@ use clap::{Parser, Subcommand};
 
 /// Top-level CLI definition for the `codex-bridge` binary.
 #[derive(Debug, Parser)]
-#[command(name = "codex-bridge", version, about = "Minimal QQ bridge for Linux QQ")]
+#[command(
+    name = "codex-bridge",
+    version,
+    about = "Codex app-server bridge with the current QQ transport"
+)]
 pub struct Cli {
     /// Selected subcommand.
     #[command(subcommand)]

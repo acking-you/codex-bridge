@@ -7,7 +7,6 @@ use codex_app_server_protocol::{
     CommandExecutionRequestApprovalParams, FileChangeApprovalDecision,
     FileChangeRequestApprovalParams, ReadOnlyAccess, SandboxPolicy, Turn, TurnError, TurnStatus,
 };
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_bridge_core::{
     approval_guard::{ApprovalDecision, ApprovalGuard},
     codex_runtime::{
@@ -16,23 +15,25 @@ use codex_bridge_core::{
         build_turn_start_params, extract_final_reply, summarize_turn_result,
     },
 };
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::json;
 
 fn test_guard() -> ApprovalGuard {
-    ApprovalGuard::new("/home/ts_user/llm_pro/NapCatQQ")
+    ApprovalGuard::new("/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ")
 }
 
 fn runtime_config() -> codex_bridge_core::codex_runtime::CodexRuntimeConfig {
     codex_bridge_core::codex_runtime::CodexRuntimeConfig::new(
-        "/home/ts_user/rust_pro/codex",
-        "/tmp/qqbot-workspace",
+        "/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs",
+        "/tmp/codex-bridge",
     )
 }
 
 #[test]
 fn review_command_denies_dangerous_kill_command() {
     let guard = test_guard();
-    let decision = guard.review_command("kill -9 1", "/home/ts_user/llm_pro/NapCatQQ", &[]);
+    let decision =
+        guard.review_command("kill -9 1", "/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ", &[]);
 
     match decision {
         ApprovalDecision::Deny(reason) => {
@@ -45,9 +46,11 @@ fn review_command_denies_dangerous_kill_command() {
 #[test]
 fn review_command_allows_safe_local_inspection() {
     let guard = test_guard();
-    let decision =
-        guard
-            .review_command("ls -la --color=never .", "/home/ts_user/llm_pro/NapCatQQ/subdir", &[]);
+    let decision = guard.review_command(
+        "ls -la --color=never .",
+        "/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ/subdir",
+        &[],
+    );
 
     assert_eq!(decision, ApprovalDecision::Allow);
 }
@@ -94,13 +97,16 @@ fn extract_final_reply_ignores_non_text_or_empty_items() {
 #[test]
 fn runtime_config_builds_expected_paths() {
     let config = runtime_config();
-    assert_eq!(config.codex_repo_root, PathBuf::from("/home/ts_user/rust_pro/codex"));
-    assert_eq!(config.workspace_root, PathBuf::from("/tmp/qqbot-workspace"));
+    assert_eq!(
+        config.codex_repo_root,
+        PathBuf::from("/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs")
+    );
+    assert_eq!(config.workspace_root, PathBuf::from("/tmp/codex-bridge"));
 }
 
 #[test]
 fn guard_constructor_uses_explicit_workspace_root() {
-    let guard = ApprovalGuard::new("/tmp/qqbot-workspace");
+    let guard = ApprovalGuard::new("/tmp/codex-bridge");
     let decision = guard.review_command("ls -la", "/tmp/other", &[]);
     assert_eq!(decision, ApprovalDecision::Deny("cwd escapes workspace: /tmp/other".to_string()));
 }
@@ -110,7 +116,7 @@ fn thread_start_params_include_prompt_and_persisted_history() {
     let config = runtime_config();
     let params = build_thread_start_params(&config, "private:123");
 
-    assert_eq!(params.cwd, Some("/tmp/qqbot-workspace".to_string()));
+    assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(params.sandbox, Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite));
     assert_eq!(params.service_name.as_deref(), Some("private:123"));
@@ -124,7 +130,7 @@ fn thread_resume_params_keep_existing_prompt_version() {
     let params = build_thread_resume_params(&config, "thread-1");
 
     assert_eq!(params.thread_id, "thread-1");
-    assert_eq!(params.cwd, Some("/tmp/qqbot-workspace".to_string()));
+    assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(params.sandbox, Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite));
     assert!(params.developer_instructions.is_none());
@@ -137,7 +143,7 @@ fn turn_start_params_use_workspace_write_and_granular_approvals() {
     let params = build_turn_start_params(&config, "thread-1", "hello codex");
 
     assert_eq!(params.thread_id, "thread-1");
-    assert_eq!(params.cwd, Some("/tmp/qqbot-workspace".into()));
+    assert_eq!(params.cwd, Some("/tmp/codex-bridge".into()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(
         params.approval_policy,
@@ -152,7 +158,7 @@ fn turn_start_params_use_workspace_write_and_granular_approvals() {
     assert_eq!(
         params.sandbox_policy,
         Some(SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![AbsolutePathBuf::from_absolute_path("/tmp/qqbot-workspace")
+            writable_roots: vec![AbsolutePathBuf::from_absolute_path("/tmp/codex-bridge")
                 .expect("absolute workspace root")],
             read_only_access: ReadOnlyAccess::FullAccess,
             network_access: true,
@@ -179,16 +185,14 @@ fn command_approval_declines_extra_permission_requests() {
         reason: None,
         network_approval_context: None,
         command: Some("ls -la".to_string()),
-        cwd: Some(PathBuf::from("/home/ts_user/llm_pro/NapCatQQ")),
+        cwd: Some(PathBuf::from("/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ")),
         command_actions: None,
         additional_permissions: Some(codex_app_server_protocol::AdditionalPermissionProfile {
             network: Some(codex_app_server_protocol::AdditionalNetworkPermissions {
                 enabled: Some(true),
             }),
             file_system: None,
-            macos: None,
         }),
-        skill_metadata: None,
         proposed_execpolicy_amendment: None,
         proposed_network_policy_amendments: None,
         available_decisions: None,

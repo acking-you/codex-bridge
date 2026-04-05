@@ -26,8 +26,8 @@ pub struct RuntimeTokens {
 pub struct RuntimePaths {
     /// Rust project root (`codex-bridge/`).
     pub project_root: PathBuf,
-    /// Parent repository root (`NapCatQQ/`).
-    pub repo_root: PathBuf,
+    /// NapCat source repository root located under `deps/NapCatQQ`.
+    pub napcat_repo_root: PathBuf,
     /// Root runtime directory.
     pub runtime_root: PathBuf,
     /// Runtime config directory.
@@ -62,8 +62,9 @@ pub struct RuntimePaths {
 
 impl RuntimePaths {
     /// Build the runtime path set relative to the Rust project root.
-    pub fn new(repo_root: &Path, qq_executable: Option<PathBuf>) -> Self {
-        let runtime_root = repo_root.join(".run/default");
+    pub fn new(project_root: &Path, qq_executable: Option<PathBuf>) -> Self {
+        let runtime_root = project_root.join(".run/default");
+        let napcat_repo_root = project_root.join("deps/NapCatQQ");
         let run_dir = runtime_root.join("run");
         let qq_executable = qq_executable.unwrap_or_else(default_qq_executable);
         let qq_base = qq_executable
@@ -72,11 +73,8 @@ impl RuntimePaths {
             .unwrap_or_else(|| qq_executable.clone());
         let resources_app_dir = qq_base.join("resources/app");
         Self {
-            project_root: repo_root.to_path_buf(),
-            repo_root: repo_root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| repo_root.to_path_buf()),
+            project_root: project_root.to_path_buf(),
+            napcat_repo_root: napcat_repo_root.clone(),
             runtime_root: runtime_root.clone(),
             config_dir: runtime_root.join("config"),
             logs_dir: runtime_root.join("logs"),
@@ -90,11 +88,7 @@ impl RuntimePaths {
             app_launcher_dir: resources_app_dir.join("app_launcher"),
             qq_package_json: resources_app_dir.join("package.json"),
             qq_load_script: resources_app_dir.join("loadNapCat.js"),
-            built_shell_dir: repo_root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| repo_root.to_path_buf())
-                .join("packages/napcat-shell/dist"),
+            built_shell_dir: napcat_repo_root.join("packages/napcat-shell/dist"),
             pid_file: runtime_root.join("run/qq.pid"),
         }
     }

@@ -10,4 +10,4 @@ test:
 	@cargo test --workspace
 
 run:
-	@cargo run -p codex-bridge -- run
+	@cargo run -p codex-bridge-cli -- run

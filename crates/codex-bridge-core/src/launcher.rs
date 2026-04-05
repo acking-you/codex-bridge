@@ -181,12 +181,12 @@ fn find_running_executable_pids(qq_executable: &Path) -> Result<Vec<u32>> {
 }
 
 async fn ensure_workspace_built(paths: &RuntimePaths) -> Result<()> {
-    if !paths.repo_root.join("node_modules").exists() {
-        run_checked(["pnpm", "install"], &paths.repo_root).await?;
+    if !paths.napcat_repo_root.join("node_modules").exists() {
+        run_checked(["pnpm", "install"], &paths.napcat_repo_root).await?;
     }
-    run_checked(["pnpm", "build:webui"], &paths.repo_root).await?;
-    run_checked(["pnpm", "build:plugin-builtin"], &paths.repo_root).await?;
-    run_checked(["pnpm", "build:shell"], &paths.repo_root).await?;
+    run_checked(["pnpm", "build:webui"], &paths.napcat_repo_root).await?;
+    run_checked(["pnpm", "build:plugin-builtin"], &paths.napcat_repo_root).await?;
+    run_checked(["pnpm", "build:shell"], &paths.napcat_repo_root).await?;
     Ok(())
 }
 
@@ -196,7 +196,7 @@ async fn ensure_qq_installed(paths: &RuntimePaths) -> Result<()> {
     }
 
     let selection = select_linuxqq_package()?;
-    let temp_root = env::temp_dir().join(format!("my-qq-bot-install-{}", std::process::id()));
+    let temp_root = env::temp_dir().join(format!("codex-bridge-install-{}", std::process::id()));
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root)?;
     }

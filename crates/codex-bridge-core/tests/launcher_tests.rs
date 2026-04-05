@@ -41,4 +41,9 @@ fn prepare_runtime_state_writes_expected_files() {
     assert!(paths.config_dir.join("webui.json").exists());
     assert!(paths.config_dir.join("onebot11.json").exists());
     assert!(paths.launcher_env.exists());
+    assert_eq!(paths.napcat_repo_root, project_root.join("deps/NapCatQQ"));
+    assert_eq!(
+        paths.built_shell_dir,
+        project_root.join("deps/NapCatQQ/packages/napcat-shell/dist")
+    );
 }

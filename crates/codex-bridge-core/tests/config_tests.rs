@@ -6,11 +6,14 @@ use codex_bridge_core::{config::RuntimeConfig, runtime::RuntimePaths};
 
 #[test]
 fn default_runtime_paths_live_under_project_run_dir() {
-    let repo_root = PathBuf::from("/tmp/repo");
-    let paths = RuntimePaths::new(&repo_root, None);
-    assert_eq!(paths.runtime_root, repo_root.join(".run/default"));
-    assert_eq!(paths.database_path, repo_root.join(".run/default/state.sqlite3"));
-    assert_eq!(paths.launcher_env, repo_root.join(".run/default/run/launcher.env"));
+    let project_root = PathBuf::from("/tmp/repo");
+    let napcat_root = project_root.join("deps/NapCatQQ");
+    let paths = RuntimePaths::new(&project_root, None);
+    assert_eq!(paths.runtime_root, project_root.join(".run/default"));
+    assert_eq!(paths.database_path, project_root.join(".run/default/state.sqlite3"));
+    assert_eq!(paths.launcher_env, project_root.join(".run/default/run/launcher.env"));
+    assert_eq!(paths.napcat_repo_root, napcat_root);
+    assert_eq!(paths.built_shell_dir, napcat_root.join("packages/napcat-shell/dist"));
 }
 
 #[test]

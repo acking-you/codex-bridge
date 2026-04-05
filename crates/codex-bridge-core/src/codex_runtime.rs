@@ -330,7 +330,7 @@ impl CodexRuntime {
         let mut next = self.next_request_id.lock().await;
         let id = *next;
         *next += 1;
-        RequestId::String(format!("qqbot-{id}"))
+        RequestId::String(format!("codex-bridge-{id}"))
     }
 
     async fn write_message<T>(&self, message: T) -> Result<()>
@@ -676,7 +676,6 @@ pub fn build_file_change_approval_response(
 fn requests_additional_permissions(params: &CommandExecutionRequestApprovalParams) -> bool {
     params.additional_permissions.is_some()
         || params.network_approval_context.is_some()
-        || params.skill_metadata.is_some()
         || params.proposed_execpolicy_amendment.is_some()
         || params
             .proposed_network_policy_amendments
