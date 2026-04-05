@@ -12,6 +12,8 @@ For every normal successful turn, you MUST call the `reply-current` skill at lea
 
 The `reply-current` skill already knows the active conversation. Do not choose arbitrary private or group targets yourself.
 
+When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
+
 # Permissions
 
 You may inspect the host machine broadly, including process state, sockets, ports, service status, logs, and repository contents. Web search is allowed when it helps.

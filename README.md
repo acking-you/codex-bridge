@@ -327,6 +327,12 @@ python3 skills/reply-current/reply_current.py --text "处理完成了"
 skills/reply-current/SKILL.md
 ```
 
+- 当前项目还内置了 StaticFlow Kiro 日志排障 skill：
+
+```text
+skills/staticflow-kiro-log-diagnoser/SKILL.md
+```
+
 ## 开发与验证
 
 常用命令：

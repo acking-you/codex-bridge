@@ -38,10 +38,25 @@ fn runtime_config() -> codex_bridge_core::codex_runtime::CodexRuntimeConfig {
     )
 }
 
+fn write_skill(workspace_root: &std::path::Path, skill_name: &str) {
+    let skill_dir = workspace_root.join("skills").join(skill_name);
+    fs::create_dir_all(&skill_dir).expect("create skill directory");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: {skill_name}\ndescription: Use when testing skill injection\n---\n\n# \
+             {skill_name}\n"
+        ),
+    )
+    .expect("write skill file");
+}
+
 #[test]
 fn system_prompt_mentions_reply_skill_and_artifact_boundary() {
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains(".run/artifacts/"));
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("reply-current"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("staticflow-kiro-log-diagnoser"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("StaticFlow"));
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("inspect the host machine broadly"));
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("You are a cyber-human lifeform"));
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("If someone asks who you are"));
@@ -180,11 +195,19 @@ fn thread_resume_params_reapply_current_system_prompt() {
 
 #[test]
 fn turn_start_params_use_workspace_write_and_granular_approvals() {
-    let config = runtime_config();
-    let params = build_turn_start_params(&config, "thread-1", "hello codex");
+    let dir = tempdir().expect("tempdir");
+    let workspace_root = dir.path().join("workspace");
+    fs::create_dir_all(&workspace_root).expect("create workspace");
+    write_skill(&workspace_root, "reply-current");
+    write_skill(&workspace_root, "staticflow-kiro-log-diagnoser");
+
+    let mut config = runtime_config();
+    config.workspace_root = workspace_root.clone();
+    let params =
+        build_turn_start_params(&config, "thread-1", "hello codex").expect("build turn params");
 
     assert_eq!(params.thread_id, "thread-1");
-    assert_eq!(params.cwd, Some("/tmp/codex-bridge".into()));
+    assert_eq!(params.cwd, Some(workspace_root.clone()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(
         params.approval_policy,
@@ -199,7 +222,7 @@ fn turn_start_params_use_workspace_write_and_granular_approvals() {
     assert_eq!(
         params.sandbox_policy,
         Some(SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![AbsolutePathBuf::from_absolute_path("/tmp/codex-bridge")
+            writable_roots: vec![AbsolutePathBuf::from_absolute_path(&workspace_root)
                 .expect("absolute workspace root")],
             read_only_access: ReadOnlyAccess::FullAccess,
             network_access: true,
@@ -207,10 +230,14 @@ fn turn_start_params_use_workspace_write_and_granular_approvals() {
             exclude_slash_tmp: false,
         })
     );
-    assert_eq!(params.input.len(), 2);
+    assert_eq!(params.input.len(), 3);
     assert_eq!(params.input[1], UserInput::Skill {
         name: "reply-current".to_string(),
-        path: PathBuf::from("/tmp/codex-bridge/skills/reply-current/SKILL.md"),
+        path: workspace_root.join("skills/reply-current/SKILL.md"),
+    });
+    assert_eq!(params.input[2], UserInput::Skill {
+        name: "staticflow-kiro-log-diagnoser".to_string(),
+        path: workspace_root.join("skills/staticflow-kiro-log-diagnoser/SKILL.md"),
     });
 }
 

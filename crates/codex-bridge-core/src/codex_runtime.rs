@@ -1,6 +1,12 @@
 //! Thin stdio runtime wrapper for `codex app-server`.
 
-use std::{collections::VecDeque, env, path::PathBuf, process::Stdio, sync::Mutex as StdMutex};
+use std::{
+    collections::VecDeque,
+    env, fs,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Mutex as StdMutex,
+};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -448,7 +454,7 @@ impl CodexExecutor for CodexRuntime {
         let request_id = self.next_request_id().await;
         let request = ClientRequest::TurnStart {
             request_id: request_id.clone(),
-            params: build_turn_start_params(&self.config, thread_id, input_text),
+            params: build_turn_start_params(&self.config, thread_id, input_text)?,
         };
         info!(thread_id, "starting codex turn");
         let response: TurnStartResponse =
@@ -805,35 +811,84 @@ pub fn build_thread_resume_params(
     })
 }
 
+fn discover_project_skills(workspace_root: &Path) -> Result<Vec<UserInput>> {
+    let skills_root = workspace_root.join("skills");
+    let entries = fs::read_dir(&skills_root)
+        .with_context(|| format!("read project skills directory {}", skills_root.display()))?;
+    let mut skills = Vec::new();
+
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("read project skill entry under {}", skills_root.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type for {}", entry.path().display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let skill_name = entry.file_name().to_string_lossy().into_owned();
+        let skill_path = entry.path().join("SKILL.md");
+        if skill_path.is_file() {
+            skills.push(UserInput::Skill {
+                name: skill_name,
+                path: skill_path,
+            });
+        }
+    }
+
+    skills.sort_by(|left, right| match (left, right) {
+        (
+            UserInput::Skill {
+                name: left, ..
+            },
+            UserInput::Skill {
+                name: right, ..
+            },
+        ) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    });
+
+    if skills.is_empty() {
+        anyhow::bail!("no project skills were found under {}", skills_root.display());
+    }
+
+    if !skills.iter().any(|skill| {
+        matches!(
+            skill,
+            UserInput::Skill { name, .. } if name == "reply-current"
+        )
+    }) {
+        anyhow::bail!(
+            "required project skill reply-current is missing under {}",
+            skills_root.display()
+        );
+    }
+
+    Ok(skills)
+}
+
 /// Build `turn/start` params using the QQ bot's fixed safety policy.
 pub fn build_turn_start_params(
     config: &CodexRuntimeConfig,
     thread_id: &str,
     input_text: &str,
-) -> TurnStartParams {
-    // Skill selection in Codex matches by exact path against discovered metadata.
-    // Repo skills are discovered from `.agents/skills` but stored as canonical real
-    // paths, so the injected selection must point at the real skill file under
-    // `skills/`.
-    let reply_skill_path = config.workspace_root.join("skills/reply-current/SKILL.md");
-    TurnStartParams {
+) -> Result<TurnStartParams> {
+    let mut input = vec![UserInput::Text {
+        text: input_text.to_string(),
+        text_elements: Vec::new(),
+    }];
+    input.extend(discover_project_skills(&config.workspace_root)?);
+
+    Ok(TurnStartParams {
         thread_id: thread_id.to_string(),
-        input: vec![
-            UserInput::Text {
-                text: input_text.to_string(),
-                text_elements: Vec::new(),
-            },
-            UserInput::Skill {
-                name: "reply-current".to_string(),
-                path: reply_skill_path,
-            },
-        ],
+        input,
         cwd: Some(config.workspace_root.clone()),
         approval_policy: Some(default_approval_policy()),
         approvals_reviewer: Some(ApprovalsReviewer::User),
         sandbox_policy: Some(default_sandbox_policy(&config.workspace_root)),
         ..Default::default()
-    }
+    })
 }
 
 /// Build `turn/interrupt` params for the active turn.
