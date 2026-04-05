@@ -11,7 +11,10 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex},
     time::sleep,
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -79,10 +82,30 @@ pub fn webui_password_hash(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Build the authenticated websocket request used for the formal OneBot
+/// channel.
+pub fn build_websocket_request(
+    config: &RuntimeConfig,
+    tokens: &RuntimeTokens,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    let ws_url = format!("ws://{}:{}/", config.websocket_host, config.websocket_port);
+    let mut request = ws_url
+        .into_client_request()
+        .context("build websocket upgrade request")?;
+    if !tokens.ws_token.is_empty() {
+        request.headers_mut().insert(
+            "Authorization",
+            HeaderValue::from_str(format!("Bearer {}", tokens.ws_token).as_str())
+                .context("build websocket authorization header")?,
+        );
+    }
+    Ok(request)
+}
+
 /// Wait for WebUI, authenticate, bootstrap the session, and consume commands.
 pub async fn run_bridge_loop(
     config: RuntimeConfig,
-    _tokens: RuntimeTokens,
+    tokens: RuntimeTokens,
     state: ServiceState,
     mut command_rx: mpsc::Receiver<ServiceCommand>,
 ) -> Result<()> {
@@ -93,7 +116,7 @@ pub async fn run_bridge_loop(
         })
         .await;
 
-    let (client, mut event_rx) = NapCatClient::connect(&config).await?;
+    let (client, mut event_rx) = NapCatClient::connect(&config, &tokens).await?;
     let identity = match wait_for_login_identity(&client).await {
         Ok(identity) => identity,
         Err(error) if is_disconnected_error(&error) => {
@@ -190,10 +213,11 @@ impl NapCatClient {
     /// actions/events.
     pub async fn connect(
         config: &RuntimeConfig,
+        tokens: &RuntimeTokens,
     ) -> Result<(Self, mpsc::Receiver<NormalizedEvent>)> {
-        let ws_url = format!("ws://{}:{}/", config.websocket_host, config.websocket_port);
+        let request = build_websocket_request(config, tokens)?;
         let stream = loop {
-            match connect_async(ws_url.as_str()).await {
+            match connect_async(request.clone()).await {
                 Ok((stream, _)) => break stream,
                 Err(_) => sleep(Duration::from_secs(1)).await,
             }

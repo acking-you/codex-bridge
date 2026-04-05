@@ -47,3 +47,23 @@ fn prepare_runtime_state_writes_expected_files() {
         project_root.join("deps/NapCatQQ/packages/napcat-shell/dist")
     );
 }
+
+#[test]
+fn prepare_runtime_state_enables_formal_websocket_server() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let project_root = tempdir.path().join("codex-bridge");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let paths = RuntimePaths::new(&project_root, None);
+    let config = RuntimeConfig::default();
+
+    prepare_runtime_state(&paths, &config, || "webui-token".to_string(), || "ws-token".to_string())
+        .expect("prepare runtime state");
+
+    let onebot: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(paths.config_dir.join("onebot11.json"))
+            .expect("read onebot config"),
+    )
+    .expect("parse onebot config");
+
+    assert_eq!(onebot["network"]["websocketServers"][0]["enable"], serde_json::Value::Bool(true));
+}

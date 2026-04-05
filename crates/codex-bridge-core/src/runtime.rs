@@ -219,7 +219,7 @@ fn build_onebot_config(config: &RuntimeConfig, token: &str) -> serde_json::Value
             "httpClients": [],
             "websocketServers": [
                 {
-                    "enable": false,
+                    "enable": true,
                     "name": "compatibility",
                     "host": config.websocket_host,
                     "port": config.websocket_port,

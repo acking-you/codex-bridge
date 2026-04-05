@@ -1,8 +1,10 @@
 //! NapCat transport frame tests.
 
 use codex_bridge_core::{
+    config::RuntimeConfig,
     events::NormalizedEvent,
-    napcat::{build_action_frame, IncomingFrame},
+    napcat::{build_action_frame, build_websocket_request, IncomingFrame},
+    runtime::RuntimeTokens,
 };
 
 #[test]
@@ -74,4 +76,18 @@ fn incoming_frame_from_value_distinguishes_event_and_response() {
         },
         IncomingFrame::Event(_) => panic!("expected response"),
     }
+}
+
+#[test]
+fn websocket_request_includes_bearer_token() {
+    let config = RuntimeConfig::default();
+    let tokens = RuntimeTokens {
+        webui_token: "webui-token".to_string(),
+        ws_token: "ws-token".to_string(),
+    };
+
+    let request = build_websocket_request(&config, &tokens).expect("build websocket request");
+
+    assert_eq!(request.uri().to_string(), "ws://127.0.0.1:3012/");
+    assert_eq!(request.headers()["authorization"], "Bearer ws-token");
 }
