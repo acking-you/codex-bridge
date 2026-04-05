@@ -16,6 +16,14 @@ pub struct Cli {
 pub enum Commands {
     /// Run the foreground bridge service.
     Run,
+    /// Print the current task snapshot from the local bridge service.
+    Status,
+    /// Print the current queue snapshot from the local bridge service.
+    Queue,
+    /// Cancel the currently running task.
+    Cancel,
+    /// Retry the latest failed or interrupted task for the active conversation.
+    RetryLast,
     /// Send a private text message through the local bridge service.
     SendPrivate {
         /// Target QQ user identifier.

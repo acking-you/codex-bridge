@@ -1,13 +1,20 @@
 //! Binary entrypoint for Codex Bridge.
 
-use std::path::PathBuf;
+use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
 use codex_bridge_cli::cli::{Cli, Commands};
-use codex_bridge_core::{api, config::RuntimeConfig, launcher, napcat, service::ServiceState};
+use codex_bridge_core::{
+    api,
+    codex_runtime::{CodexRuntime, CodexRuntimeConfig},
+    config::RuntimeConfig,
+    launcher, napcat, orchestrator,
+    service::ServiceState,
+    state_store::StateStore,
+};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_LOG_FILTER: &str = "warn,codex_bridge_cli=info,codex_bridge_core=info";
@@ -25,6 +32,14 @@ async fn main() -> Result<()> {
     let config = RuntimeConfig::default();
     match cli.command {
         Commands::Run => run_command(config).await,
+        Commands::Status => get_local_json(&config, "/api/status").await.map(|_| ()),
+        Commands::Queue => get_local_json(&config, "/api/queue").await.map(|_| ()),
+        Commands::Cancel => post_local_json(&config, "/api/tasks/cancel", json!({}))
+            .await
+            .map(|_| ()),
+        Commands::RetryLast => post_local_json(&config, "/api/tasks/retry-last", json!({}))
+            .await
+            .map(|_| ()),
         Commands::SendPrivate {
             user_id,
             text,
@@ -60,7 +75,8 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     let project_root = project_root()?;
     let prepared = launcher::prepare_launch(&project_root, &config).await?;
     let (command_tx, command_rx) = mpsc::channel(64);
-    let state = ServiceState::new(command_tx);
+    let (control_tx, control_rx) = mpsc::channel(64);
+    let state = ServiceState::with_control(command_tx, control_tx);
 
     let api_bind = config.api_bind.clone();
     let api_state = state.clone();
@@ -81,6 +97,26 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         }
     });
 
+    let codex_state = state.clone();
+    let _store = Arc::new(Mutex::new(StateStore::open(&prepared.paths.database_path)?));
+    let (event_tx, event_rx) = mpsc::channel(256);
+    let mut event_sub = codex_state.subscribe_events();
+    tokio::spawn(async move {
+        while let Ok(event) = event_sub.recv().await {
+            let _ = event_tx.send(event).await;
+        }
+    });
+    let codex = Arc::new(
+        CodexRuntime::new(CodexRuntimeConfig::new(codex_repo_root(), project_root.clone())).await?,
+    );
+    tokio::spawn(async move {
+        if let Err(error) =
+            orchestrator::run(codex_state, event_rx, control_rx, codex.as_ref()).await
+        {
+            eprintln!("orchestrator stopped: {error:#}");
+        }
+    });
+
     launcher::launch_qq_foreground(&prepared, config.api_bind.as_str()).await
 }
 
@@ -90,6 +126,12 @@ fn project_root() -> Result<PathBuf> {
         anyhow::bail!("failed to derive project root from {}", manifest_dir.display());
     };
     Ok(project_root.to_path_buf())
+}
+
+fn codex_repo_root() -> PathBuf {
+    env::var_os("CODEX_REPO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/ts_user/rust_pro/codex/codex-rs"))
 }
 
 async fn get_local_json(config: &RuntimeConfig, path: &str) -> Result<Value> {
