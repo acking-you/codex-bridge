@@ -97,7 +97,19 @@ pub async fn run_bridge_loop(
         .await;
 
     let (client, mut event_rx) = NapCatClient::connect(&config).await?;
-    let identity = wait_for_login_identity(&client).await?;
+    let identity = match wait_for_login_identity(&client).await {
+        Ok(identity) => identity,
+        Err(error) if is_disconnected_error(&error) => {
+            state
+                .set_session(SessionSnapshot {
+                    status: SessionStatus::Disconnected,
+                    ..state.session().await
+                })
+                .await;
+            return Err(error);
+        },
+        Err(error) => return Err(error),
+    };
     let previous = state.session().await;
     state
         .set_session(SessionSnapshot {
@@ -372,8 +384,31 @@ async fn wait_for_login_identity(client: &NapCatClient) -> Result<LoginIdentity>
     loop {
         match client.get_login_info().await {
             Ok(identity) => return Ok(identity),
+            Err(error) if is_disconnected_error(&error) => return Err(error),
             Err(_) => sleep(Duration::from_secs(1)).await,
         }
+    }
+}
+
+fn is_disconnected_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("websocket send channel closed")
+        || message.contains("action response dropped for get_login_info")
+        || message.contains("websocket disconnected")
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    #[test]
+    fn disconnected_error_patterns_are_detected() {
+        assert!(super::is_disconnected_error(&anyhow!("websocket send channel closed")));
+        assert!(super::is_disconnected_error(&anyhow!(
+            "action response dropped for get_login_info"
+        )));
+        assert!(super::is_disconnected_error(&anyhow!("websocket disconnected")));
+        assert!(!super::is_disconnected_error(&anyhow!("temporary login error")));
     }
 }
 
