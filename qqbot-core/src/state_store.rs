@@ -2,13 +2,12 @@
 
 use std::{
     fs,
-    io::Error as IoError,
-    io::ErrorKind,
+    io::{Error as IoError, ErrorKind},
     path::Path,
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params, types::Type, Error};
+use rusqlite::{params, types::Type, Connection, Error, OptionalExtension};
 use uuid::Uuid;
 
 use crate::system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION};
@@ -101,7 +100,9 @@ impl StateStore {
         }
 
         let conn = Connection::open(path).context("open sqlite state database")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+        };
         store.migrate_and_seed()?;
         Ok(store)
     }
@@ -109,7 +110,9 @@ impl StateStore {
     /// Open a new in-memory state store and run migrations.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("open in-memory sqlite state database")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+        };
         store.migrate_and_seed()?;
         Ok(store)
     }
@@ -123,11 +126,7 @@ impl StateStore {
                  ON CONFLICT(conversation_key) DO UPDATE SET
                    thread_id = excluded.thread_id,
                    prompt_version = excluded.prompt_version",
-                params![
-                    binding.conversation_key,
-                    binding.thread_id,
-                    binding.prompt_version
-                ],
+                params![binding.conversation_key, binding.thread_id, binding.prompt_version],
             )
             .context("upsert conversation binding")?;
         Ok(())
@@ -140,28 +139,24 @@ impl StateStore {
              FROM conversation_bindings
              WHERE conversation_key = ?1",
         )?;
-        stmt
-            .query_row((conversation_key,), |row| {
-                Ok(ConversationBinding {
-                    conversation_key: row.get(0)?,
-                    thread_id: row.get(1)?,
-                    prompt_version: row.get(2)?,
-                })
+        stmt.query_row((conversation_key,), |row| {
+            Ok(ConversationBinding {
+                conversation_key: row.get(0)?,
+                thread_id: row.get(1)?,
+                prompt_version: row.get(2)?,
             })
-            .optional()
-            .context("query conversation binding")
+        })
+        .optional()
+        .context("query conversation binding")
     }
 
     /// Insert a new task row and return the generated id.
-    pub fn insert_task(
-        &self,
-        binding: &ConversationBinding,
-        status: TaskStatus,
-    ) -> Result<String> {
+    pub fn insert_task(&self, binding: &ConversationBinding, status: TaskStatus) -> Result<String> {
         let task_id = Uuid::new_v4().to_string();
         self.conn
             .execute(
-                "INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, status, created_at)
+                "INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, \
+                 status, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now'))",
                 params![
                     task_id,
@@ -205,15 +200,16 @@ impl StateStore {
     pub fn mark_running_tasks_interrupted(&self) -> Result<usize> {
         let updated = self
             .conn
-            .execute(
-                "UPDATE task_runs SET status = ?1 WHERE status = ?2",
-                params![TaskStatus::Interrupted.as_str(), TaskStatus::Running.as_str()],
-            )
+            .execute("UPDATE task_runs SET status = ?1 WHERE status = ?2", params![
+                TaskStatus::Interrupted.as_str(),
+                TaskStatus::Running.as_str()
+            ])
             .context("mark running tasks interrupted")?;
         Ok(updated)
     }
 
-    /// Check whether a system prompt version exists in the prompt-version registry.
+    /// Check whether a system prompt version exists in the prompt-version
+    /// registry.
     pub fn has_system_prompt_version(&self, version: &str) -> Result<bool> {
         let mut stmt = self.conn.prepare(
             "SELECT 1
@@ -244,19 +240,23 @@ impl StateStore {
         Ok(text)
     }
 
-fn migrate_and_seed(&mut self) -> Result<()> {
+    fn migrate_and_seed(&mut self) -> Result<()> {
         let current_version: i32 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
             .context("read sqlite user_version")?;
         if current_version > CURRENT_SCHEMA_VERSION {
             anyhow::bail!(
-                "unsupported sqlite schema version {current_version} (max supported {CURRENT_SCHEMA_VERSION})"
+                "unsupported sqlite schema version {current_version} (max supported \
+                 {CURRENT_SCHEMA_VERSION})"
             );
         }
 
         if current_version < CURRENT_SCHEMA_VERSION {
-            let tx = self.conn.transaction().context("start migration transaction")?;
+            let tx = self
+                .conn
+                .transaction()
+                .context("start migration transaction")?;
             tx.execute_batch(
                 "CREATE TABLE conversation_bindings (
                     conversation_key TEXT PRIMARY KEY,

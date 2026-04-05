@@ -1,12 +1,22 @@
 //! SQLite state store tests.
 
 use qqbot_core::{
-    state_store::{ConversationBinding, TaskStatus, StateStore},
-    system_prompt::SYSTEM_PROMPT_VERSION,
-    system_prompt::SYSTEM_PROMPT_TEXT,
+    state_store::{ConversationBinding, StateStore, TaskStatus},
+    system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION},
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
+
+const LEGACY_SYSTEM_PROMPT_VERSION: &str = "v1.0.0";
+const LEGACY_SYSTEM_PROMPT_TEXT: &str =
+    "You are an assistant constrained to this project only.\nDo not help with other systems \
+     outside the repository under task. For this project,\nyou may use web search when external \
+     references are required and you may run low-risk\nshell inspection (for example, listing \
+     directories, reading non-sensitive logs,\nand checking process status). Do NOT use \
+     thread/shellCommand. Never issue or\nrecommend commands such as kill, pkill, killall, \
+     reboot, shutdown, poweroff,\nsystemctl stop, systemctl restart, or kill. If a request is \
+     blocked by policy,\nexplain the refusal clearly and switch to a safe workflow that still \
+     meets the\nintent if possible.";
 
 #[test]
 fn binding_round_trip() {
@@ -35,9 +45,7 @@ fn running_task_marks_interrupted() {
         prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
-    store
-        .upsert_binding(&binding)
-        .expect("upsert binding");
+    store.upsert_binding(&binding).expect("upsert binding");
     let task_id = store
         .insert_task(&binding, TaskStatus::Running)
         .expect("insert running task");
@@ -83,7 +91,9 @@ fn latest_task_for_conversation_returns_recent() {
 #[test]
 fn system_prompt_version_is_seeded() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
-    assert!(store.has_system_prompt_version(SYSTEM_PROMPT_VERSION).expect("query prompt version"));
+    assert!(store
+        .has_system_prompt_version(SYSTEM_PROMPT_VERSION)
+        .expect("query prompt version"));
 }
 
 #[test]
@@ -117,10 +127,10 @@ fn system_prompt_same_version_with_different_text_fails() {
     drop(store);
 
     let conn = Connection::open(&path).expect("open sqlite db");
-    conn.execute(
-        "UPDATE system_prompt_versions SET prompt_text = ?1 WHERE version = ?2",
-        [&"corrupted prompt", SYSTEM_PROMPT_VERSION],
-    )
+    conn.execute("UPDATE system_prompt_versions SET prompt_text = ?1 WHERE version = ?2", [
+        &"corrupted prompt",
+        SYSTEM_PROMPT_VERSION,
+    ])
     .expect("corrupt prompt text");
 
     let reopened = StateStore::open(&path);
@@ -128,6 +138,65 @@ fn system_prompt_same_version_with_different_text_fails() {
         reopened.is_err(),
         "expected reopening to fail when prompt text changed for same version"
     );
+}
+
+#[test]
+fn legacy_system_prompt_version_remains_and_current_version_is_seeded() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("state.sqlite3");
+    let conn = Connection::open(&path).expect("open sqlite db");
+    conn.execute_batch(
+        "
+        CREATE TABLE conversation_bindings (
+            conversation_key TEXT PRIMARY KEY,
+            thread_id INTEGER NOT NULL,
+            prompt_version TEXT NOT NULL
+        );
+        CREATE TABLE task_runs (
+            task_id TEXT PRIMARY KEY,
+            conversation_key TEXT NOT NULL,
+            thread_id INTEGER NOT NULL,
+            prompt_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE TABLE bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE system_prompt_versions (
+            version TEXT PRIMARY KEY,
+            prompt_text TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE INDEX task_runs_by_conversation_created
+            ON task_runs (conversation_key, created_at);
+        ",
+    )
+    .expect("create legacy schema");
+    conn.execute(
+        "INSERT INTO system_prompt_versions (version, prompt_text, created_at) VALUES (?1, ?2, \
+         strftime('%s', 'now'))",
+        (&LEGACY_SYSTEM_PROMPT_VERSION, &LEGACY_SYSTEM_PROMPT_TEXT),
+    )
+    .expect("insert legacy prompt row");
+    conn.execute_batch("PRAGMA user_version = 1")
+        .expect("set legacy schema version");
+    drop(conn);
+
+    let store = StateStore::open(&path).expect("open legacy db");
+
+    let legacy = store
+        .system_prompt_text_for(LEGACY_SYSTEM_PROMPT_VERSION)
+        .expect("read legacy version row")
+        .expect("legacy version exists");
+    let current = store
+        .system_prompt_text_for(SYSTEM_PROMPT_VERSION)
+        .expect("read current version row")
+        .expect("current version exists");
+
+    assert_eq!(legacy, LEGACY_SYSTEM_PROMPT_TEXT);
+    assert_eq!(current, SYSTEM_PROMPT_TEXT);
 }
 
 #[test]
@@ -140,8 +209,5 @@ fn state_store_open_fails_on_newer_schema() {
         .expect("set newer schema version");
 
     let reopened = StateStore::open(&path);
-    assert!(
-        reopened.is_err(),
-        "expected error when schema version is newer than supported"
-    );
+    assert!(reopened.is_err(), "expected error when schema version is newer than supported");
 }
