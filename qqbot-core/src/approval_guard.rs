@@ -2,8 +2,6 @@
 
 use std::path::{Component, Path, PathBuf};
 
-const WORKSPACE_ROOT: &str = "/home/ts_user/llm_pro/NapCatQQ";
-
 /// Result of a command-approval check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
@@ -21,12 +19,8 @@ pub struct ApprovalGuard {
 
 impl ApprovalGuard {
     /// Build a new guard for a workspace root.
-    ///
-    /// The current policy enforces commands to stay within
-    /// `/home/ts_user/llm_pro/NapCatQQ`, so the value is normalized for path
-    /// checks.
-    pub fn new<P: Into<PathBuf>>(_workspace_root: P) -> Self {
-        let workspace_root = PathBuf::from(WORKSPACE_ROOT);
+    pub fn new<P: Into<PathBuf>>(workspace_root: P) -> Self {
+        let workspace_root = workspace_root.into();
 
         Self {
             workspace_root,
