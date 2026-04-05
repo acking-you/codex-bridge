@@ -10,9 +10,10 @@ use codex_app_server_protocol::{
 use codex_bridge_core::{
     approval_guard::{ApprovalDecision, ApprovalGuard},
     codex_runtime::{
-        build_command_approval_response, build_file_change_approval_response,
-        build_thread_resume_params, build_thread_start_params, build_turn_interrupt_params,
-        build_turn_start_params, extract_final_reply, summarize_turn_result,
+        build_codex_app_server_command, build_command_approval_response,
+        build_file_change_approval_response, build_thread_resume_params, build_thread_start_params,
+        build_turn_interrupt_params, build_turn_start_params, extract_final_reply,
+        summarize_turn_result,
     },
 };
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -102,6 +103,24 @@ fn runtime_config_builds_expected_paths() {
         PathBuf::from("/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs")
     );
     assert_eq!(config.workspace_root, PathBuf::from("/tmp/codex-bridge"));
+}
+
+#[test]
+fn codex_app_server_command_uses_explicit_bin_selection() {
+    let config = runtime_config();
+    let command = build_codex_app_server_command(&config);
+
+    assert_eq!(command, vec![
+        "cargo".to_string(),
+        "run".to_string(),
+        "--manifest-path".to_string(),
+        "/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs/Cargo.toml".to_string(),
+        "--bin".to_string(),
+        "codex-app-server".to_string(),
+        "--".to_string(),
+        "--listen".to_string(),
+        "stdio://".to_string(),
+    ]);
 }
 
 #[test]

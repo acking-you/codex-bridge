@@ -435,23 +435,15 @@ impl CodexExecutor for CodexRuntime {
 async fn spawn_protocol_state(
     config: &CodexRuntimeConfig,
 ) -> Result<(Child, RuntimeWriteState, RuntimeReadState)> {
-    let manifest_path = config.codex_repo_root.join("Cargo.toml");
-    let mut child = Command::new("cargo")
-        .arg("run")
-        .arg("--manifest-path")
-        .arg(&manifest_path)
-        .arg("-p")
-        .arg("codex-app-server")
-        .arg("--")
-        .arg("--listen")
-        .arg("stdio://")
+    let command = build_codex_app_server_command(config);
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(&config.codex_repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .with_context(|| {
-            format!("spawn codex-app-server via manifest {}", manifest_path.display())
-        })?;
+        .with_context(|| format!("spawn codex-app-server via {}", command.join(" ")))?;
 
     let stdin = child
         .stdin
@@ -472,6 +464,22 @@ async fn spawn_protocol_state(
             pending_notifications: VecDeque::new(),
         },
     ))
+}
+
+/// Build the `cargo run` command used to launch the local `codex-app-server`.
+pub fn build_codex_app_server_command(config: &CodexRuntimeConfig) -> Vec<String> {
+    let manifest_path = config.codex_repo_root.join("Cargo.toml");
+    vec![
+        "cargo".to_string(),
+        "run".to_string(),
+        "--manifest-path".to_string(),
+        manifest_path.to_string_lossy().into_owned(),
+        "--bin".to_string(),
+        "codex-app-server".to_string(),
+        "--".to_string(),
+        "--listen".to_string(),
+        "stdio://".to_string(),
+    ]
 }
 
 impl RuntimeWriteState {
