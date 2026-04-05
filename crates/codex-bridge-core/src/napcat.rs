@@ -15,7 +15,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
 };
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -149,6 +149,10 @@ pub async fn run_bridge_loop(
     state: ServiceState,
     mut command_rx: mpsc::Receiver<ServiceCommand>,
 ) -> Result<()> {
+    info!(
+        websocket = %format!("ws://{}:{}/", config.websocket_host, config.websocket_port),
+        "starting formal OneBot bridge loop"
+    );
     state
         .set_session(SessionSnapshot {
             status: SessionStatus::WaitingForLogin,
@@ -171,6 +175,11 @@ pub async fn run_bridge_loop(
         Err(error) => return Err(error),
     };
     let previous = state.session().await;
+    info!(
+        self_id = identity.self_id,
+        nickname = %identity.nickname,
+        "formal OneBot bridge connected"
+    );
     state
         .set_session(SessionSnapshot {
             status: SessionStatus::Connected,
@@ -181,9 +190,11 @@ pub async fn run_bridge_loop(
         .await;
 
     if let Ok(friends) = client.get_friend_list().await {
+        info!(count = friends.len(), "loaded friend list");
         state.set_friends(friends).await;
     }
     if let Ok(groups) = client.get_group_list().await {
+        info!(count = groups.len(), "loaded group list");
         state.set_groups(groups).await;
     }
 

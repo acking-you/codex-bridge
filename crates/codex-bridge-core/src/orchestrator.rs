@@ -10,6 +10,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use codex_app_server_protocol::TurnStatus;
 use tokio::sync::{broadcast, mpsc, Mutex};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -388,6 +389,15 @@ async fn start_runtime_task(
         config: runtime_config,
     } = deps;
     let binding = resolve_binding(&task, codex.as_ref(), Some(state_store.as_ref())).await?;
+    info!(
+        conversation = %task.conversation_key,
+        sender_id = task.source_sender_id,
+        message_id = task.source_message_id,
+        reply_target_id = task.reply_target_id,
+        is_group = task.is_group,
+        thread_id = %binding.thread_id,
+        "starting orchestrated task"
+    );
     let persisted_task_id = {
         let store = state_store.lock().await;
         store.insert_task_with_source(
@@ -421,6 +431,12 @@ async fn start_runtime_task(
         },
     };
     let reply_token = Uuid::new_v4().to_string();
+    info!(
+        task_id = %persisted_task_id,
+        conversation = %task.conversation_key,
+        reply_token = %reply_token,
+        "reply context activated"
+    );
     state
         .activate_reply_context(ActiveReplyContext {
             token: reply_token.clone(),
@@ -460,6 +476,12 @@ async fn enqueue_runtime_task(
         task.source_message_id,
     ) {
         Ok(position) => {
+            info!(
+                conversation = %task.conversation_key,
+                sender_id = task.source_sender_id,
+                position,
+                "task enqueued"
+            );
             pending_tasks.push_back(task.clone());
             send_reply(
                 replies,
@@ -470,6 +492,11 @@ async fn enqueue_runtime_task(
             .await
         },
         Err(TaskQueueError::QueueFull) => {
+            warn!(
+                conversation = %task.conversation_key,
+                sender_id = task.source_sender_id,
+                "task rejected because queue is full"
+            );
             send_reply(
                 replies,
                 task.is_group,
@@ -516,6 +543,11 @@ async fn handle_runtime_command(
 ) -> Result<Option<TaskRequest>> {
     match command.command {
         ControlCommand::Help => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                "received help command"
+            );
             send_reply(
                 replies,
                 command.is_group,
@@ -526,6 +558,11 @@ async fn handle_runtime_command(
             Ok(None)
         },
         ControlCommand::Status => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                "received status command"
+            );
             let text = reply_formatter::format_status(
                 scheduler.running(),
                 scheduler.queue_len(),
@@ -535,11 +572,21 @@ async fn handle_runtime_command(
             Ok(None)
         },
         ControlCommand::Queue => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                "received queue command"
+            );
             let text = scheduler.queue_preview();
             send_reply(replies, command.is_group, command.reply_target_id, text).await?;
             Ok(None)
         },
         ControlCommand::Cancel => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                "received cancel command"
+            );
             let text = if let Some(active_task) = active_task {
                 if command.source_sender_id != 0
                     && command.source_sender_id != active_task.task.source_sender_id
@@ -561,6 +608,11 @@ async fn handle_runtime_command(
             Ok(None)
         },
         ControlCommand::RetryLast => {
+            info!(
+                conversation = %command.conversation_key,
+                sender_id = command.source_sender_id,
+                "received retry-last command"
+            );
             let retry_candidate = if command.source_sender_id == 0 {
                 scheduler.retry_candidate_any_owner(&command.conversation_key)
             } else {
@@ -625,6 +677,13 @@ pub async fn run(
 
                 match joined {
                     Ok(Ok(outcome)) => {
+                        info!(
+                            conversation = %current_task.task.conversation_key,
+                            message_id = current_task.task.source_message_id,
+                            task_state = ?outcome.task_state,
+                            skill_reply_count,
+                            "task finished"
+                        );
                         scheduler.finish_running(outcome.task_state, outcome.summary.clone());
                         if matches!(outcome.task_state, TaskState::Failed | TaskState::Interrupted) {
                             retryable_tasks.insert(
@@ -649,9 +708,19 @@ pub async fn run(
                                 reply_text,
                             )
                             .await?;
+                        } else {
+                            info!(
+                                conversation = %current_task.task.conversation_key,
+                                "task completed with skill-driven reply already sent"
+                            );
                         }
                     },
                     Ok(Err(error)) => {
+                        warn!(
+                            conversation = %current_task.task.conversation_key,
+                            error = %error,
+                            "task failed before producing terminal outcome"
+                        );
                         let message = format!("执行失败。原因：{error}");
                         scheduler.finish_running(TaskState::Failed, Some(message.clone()));
                         retryable_tasks.insert(
@@ -668,6 +737,11 @@ pub async fn run(
                         .await?;
                     },
                     Err(error) => {
+                        warn!(
+                            conversation = %current_task.task.conversation_key,
+                            error = %error,
+                            "task join failed"
+                        );
                         let message = format!("执行失败。原因：后台任务异常退出：{error}");
                         scheduler.finish_running(TaskState::Failed, Some(message.clone()));
                         retryable_tasks.insert(
@@ -741,6 +815,11 @@ pub async fn run(
                                 },
                                 RouteDecision::Task(task) => {
                                     if !task.is_group && !private_sender_is_friend(&state, &task).await {
+                                        info!(
+                                            conversation = %task.conversation_key,
+                                            sender_id = task.source_sender_id,
+                                            "private message rejected by friend gate"
+                                        );
                                         send_reply(
                                             &replies,
                                             false,

@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{
     message_router::{CommandRequest, ControlCommand},
@@ -245,6 +245,13 @@ async fn reply_handler(
         .into_payload(&context)
         .map_err(|error| bad_request(error.to_string().as_str()))?;
     let outbound = build_outbound_message(&context, reply_payload);
+    info!(
+        conversation = %context.conversation_key,
+        token = %token,
+        is_group = context.is_group,
+        segment_count = outbound.segments.len(),
+        "received skill reply callback"
+    );
     let receipt = state
         .send_outbound_message(outbound)
         .await

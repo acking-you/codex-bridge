@@ -184,6 +184,7 @@ Send one skill-facing reply to the active conversation:
 cargo run -p codex-bridge-cli -- reply --text "处理完成了"
 cargo run -p codex-bridge-cli -- reply --image .run/artifacts/result.png
 cargo run -p codex-bridge-cli -- reply --file .run/artifacts/report.md
+python3 skills/reply-current/reply_current.py --text "处理完成了"
 ```
 
 Current behavior:

@@ -22,6 +22,7 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex,
 };
+use tracing::info;
 
 use crate::{
     approval_guard::{ApprovalDecision, ApprovalGuard},
@@ -184,6 +185,11 @@ impl CodexRuntime {
     }
 
     async fn initialize(&self) -> Result<()> {
+        info!(
+            codex_repo_root = %self.config.codex_repo_root.display(),
+            workspace_root = %self.config.workspace_root.display(),
+            "starting codex app-server runtime"
+        );
         let request_id = self.next_request_id().await;
         let request = ClientRequest::Initialize {
             request_id: request_id.clone(),
@@ -206,6 +212,7 @@ impl CodexRuntime {
         self.send_notification(ClientNotification::Initialized)
             .await
             .context("send initialized notification")?;
+        info!("codex app-server initialized");
         Ok(())
     }
 
@@ -225,6 +232,7 @@ impl CodexRuntime {
     where
         T: for<'de> serde::Deserialize<'de>,
     {
+        info!(method, "codex request started");
         let request = client_request_to_jsonrpc(request)?;
         self.write_message(request).await?;
         let mut state = self.read_state.lock().await;
@@ -235,10 +243,12 @@ impl CodexRuntime {
                     id,
                     result,
                 }) if id == request_id => {
+                    info!(method, "codex request completed");
                     return serde_json::from_value(result)
                         .with_context(|| format!("decode {method} response payload"));
                 },
                 JSONRPCMessage::Error(error) if error.id == request_id => {
+                    info!(method, error = %error.error.message, "codex request failed");
                     return Err(anyhow!("{method} failed: {}", error.error.message));
                 },
                 JSONRPCMessage::Notification(notification) => {
@@ -254,23 +264,31 @@ impl CodexRuntime {
 
     async fn handle_server_request(&self, request: JSONRPCRequest) -> Result<()> {
         let request = ServerRequest::try_from(request).context("decode server request")?;
+        log_server_request(&request);
         match request {
             ServerRequest::CommandExecutionRequestApproval {
                 request_id,
                 params,
             } => {
                 let response = build_command_approval_response(&self.guard, &params);
+                info!(
+                    decision = ?response.decision,
+                    command = ?params.command,
+                    "command approval resolved"
+                );
                 self.write_response(request_id, response).await?;
             },
             ServerRequest::FileChangeRequestApproval {
                 request_id,
                 params,
             } => {
-                self.write_response(
-                    request_id,
-                    build_file_change_approval_response(&self.guard, &params),
-                )
-                .await?;
+                let response = build_file_change_approval_response(&self.guard, &params);
+                info!(
+                    decision = ?response.decision,
+                    grant_root = ?params.grant_root,
+                    "file-change approval resolved"
+                );
+                self.write_response(request_id, response).await?;
             },
             other => {
                 return Err(anyhow!("unsupported server request: {other:?}"));
@@ -299,6 +317,7 @@ impl CodexRuntime {
                         Ok(notification) => notification,
                         Err(_) => continue,
                     };
+                    log_server_notification(&notification);
 
                     match notification {
                         ServerNotification::ItemCompleted(payload) => {
@@ -389,8 +408,10 @@ impl CodexExecutor for CodexRuntime {
             request_id: request_id.clone(),
             params: build_turn_start_params(&self.config, thread_id, input_text),
         };
+        info!(thread_id, "starting codex turn");
         let response: TurnStartResponse =
             self.send_request(request, request_id, "turn/start").await?;
+        info!(thread_id, turn_id = %response.turn.id, "codex turn started");
 
         Ok(ActiveTurn {
             thread_id: thread_id.to_string(),
@@ -399,6 +420,11 @@ impl CodexExecutor for CodexRuntime {
     }
 
     async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult> {
+        info!(
+            thread_id = %active_turn.thread_id,
+            turn_id = %active_turn.turn_id,
+            "waiting for codex turn completion"
+        );
         let mut state = self.read_state.lock().await;
         let completion = self
             .wait_for_turn_completion(&mut state, &active_turn.thread_id, &active_turn.turn_id)
@@ -409,6 +435,13 @@ impl CodexExecutor for CodexRuntime {
             .error
             .as_ref()
             .map(|error| error.message.clone());
+        info!(
+            thread_id = %active_turn.thread_id,
+            turn_id = %active_turn.turn_id,
+            status = ?completion.turn.status,
+            items = completion.items.len(),
+            "codex turn completed"
+        );
 
         Ok(CodexTurnResult {
             thread_id: active_turn.thread_id.clone(),
@@ -421,6 +454,7 @@ impl CodexExecutor for CodexRuntime {
     }
 
     async fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<()> {
+        info!(thread_id, turn_id, "interrupting codex turn");
         let request_id = self.next_request_id().await;
         let request = ClientRequest::TurnInterrupt {
             request_id: request_id.clone(),
@@ -464,6 +498,138 @@ async fn spawn_protocol_state(
             pending_notifications: VecDeque::new(),
         },
     ))
+}
+
+/// Return a short safe description for one server notification.
+pub fn describe_server_notification(notification: &ServerNotification) -> Option<String> {
+    match notification {
+        ServerNotification::TurnStarted(payload) => Some(format!(
+            "turn started: thread={} turn={} status={}",
+            payload.thread_id,
+            payload.turn.id,
+            turn_status_label(&payload.turn.status)
+        )),
+        ServerNotification::TurnCompleted(payload) => Some(format!(
+            "turn completed: thread={} turn={} status={}",
+            payload.thread_id,
+            payload.turn.id,
+            turn_status_label(&payload.turn.status)
+        )),
+        ServerNotification::ItemStarted(payload) => Some(format!(
+            "item started: thread={} turn={} item={} type={}",
+            payload.thread_id,
+            payload.turn_id,
+            thread_item_id(&payload.item),
+            thread_item_type(&payload.item)
+        )),
+        ServerNotification::ItemCompleted(payload) => Some(format!(
+            "item completed: thread={} turn={} item={} type={}",
+            payload.thread_id,
+            payload.turn_id,
+            thread_item_id(&payload.item),
+            thread_item_type(&payload.item)
+        )),
+        ServerNotification::AgentMessageDelta(payload) => Some(format!(
+            "assistant delta: thread={} turn={} item={} text={:?}",
+            payload.thread_id, payload.turn_id, payload.item_id, payload.delta
+        )),
+        ServerNotification::CommandExecutionOutputDelta(payload) => Some(format!(
+            "command output delta: thread={} turn={} item={} bytes={}",
+            payload.thread_id,
+            payload.turn_id,
+            payload.item_id,
+            payload.delta.len()
+        )),
+        ServerNotification::FileChangeOutputDelta(payload) => Some(format!(
+            "file change delta: thread={} turn={} item={} bytes={}",
+            payload.thread_id,
+            payload.turn_id,
+            payload.item_id,
+            payload.delta.len()
+        )),
+        ServerNotification::PlanDelta(payload) => Some(format!(
+            "plan delta: thread={} turn={} item={} bytes={}",
+            payload.thread_id,
+            payload.turn_id,
+            payload.item_id,
+            payload.delta.len()
+        )),
+        ServerNotification::TurnPlanUpdated(payload) => Some(format!(
+            "turn plan updated: thread={} turn={} steps={}",
+            payload.thread_id,
+            payload.turn_id,
+            payload.plan.len()
+        )),
+        ServerNotification::ReasoningSummaryTextDelta(_)
+        | ServerNotification::ReasoningSummaryPartAdded(_)
+        | ServerNotification::ReasoningTextDelta(_) => {
+            Some("reasoning delta received (hidden)".to_string())
+        },
+        _ => Some(notification.to_string()),
+    }
+}
+
+fn log_server_notification(notification: &ServerNotification) {
+    if let Some(message) = describe_server_notification(notification) {
+        info!(event = notification.to_string(), "{message}");
+    }
+}
+
+fn log_server_request(request: &ServerRequest) {
+    match request {
+        ServerRequest::CommandExecutionRequestApproval {
+            params, ..
+        } => {
+            info!(
+                request = "commandApproval",
+                thread_id = %params.thread_id,
+                turn_id = %params.turn_id,
+                item_id = %params.item_id,
+                command = ?params.command,
+                reason = ?params.reason,
+                "codex approval requested"
+            );
+        },
+        ServerRequest::FileChangeRequestApproval {
+            params, ..
+        } => {
+            info!(
+                request = "fileChangeApproval",
+                thread_id = %params.thread_id,
+                turn_id = %params.turn_id,
+                item_id = %params.item_id,
+                grant_root = ?params.grant_root,
+                reason = ?params.reason,
+                "codex file-change approval requested"
+            );
+        },
+        other => {
+            info!(request = %serde_json::to_string(other).unwrap_or_else(|_| "unknown".to_string()), "codex server request");
+        },
+    }
+}
+
+fn thread_item_field(item: &impl serde::Serialize, field: &str) -> Option<String> {
+    serde_json::to_value(item)
+        .ok()
+        .and_then(|value| value.get(field).and_then(Value::as_str).map(str::to_string))
+}
+
+fn thread_item_id(item: &impl serde::Serialize) -> String {
+    thread_item_field(item, "id").unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn thread_item_type(item: &impl serde::Serialize) -> String {
+    thread_item_field(item, "type").unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn turn_status_label(status: &TurnStatus) -> &'static str {
+    match status {
+        TurnStatus::InProgress => "in_progress",
+        TurnStatus::Completed => "completed",
+        TurnStatus::Failed => "failed",
+        TurnStatus::Interrupted => "interrupted",
+    }
 }
 
 /// Build the `cargo run` command used to launch the local `codex-app-server`.

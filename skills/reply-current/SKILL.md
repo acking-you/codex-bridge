@@ -18,7 +18,7 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 
 ## Rules
 - Reply only to the current active conversation. Do not invent QQ IDs or group IDs.
-- Use exactly one `codex-bridge reply` command per message you want to send.
+- Use exactly one local `reply_current.py` command per message you want to send.
 - Attachments must already exist under `.run/artifacts/`.
 - Prefer text for short answers, image for visual output, and file for markdown/report artifacts.
 
@@ -26,19 +26,19 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 Send plain text:
 
 ```bash
-codex-bridge reply --text "处理完成，结论在这里。"
+python3 skills/reply-current/reply_current.py --text "处理完成，结论在这里。"
 ```
 
 Send an image artifact:
 
 ```bash
-codex-bridge reply --image .run/artifacts/result.png
+python3 skills/reply-current/reply_current.py --image .run/artifacts/result.png
 ```
 
 Send a file artifact:
 
 ```bash
-codex-bridge reply --file .run/artifacts/report.md
+python3 skills/reply-current/reply_current.py --file .run/artifacts/report.md
 ```
 
 ## Common Mistakes

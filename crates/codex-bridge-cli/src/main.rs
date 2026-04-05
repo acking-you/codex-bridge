@@ -25,6 +25,7 @@ use codex_bridge_core::{
 };
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_LOG_FILTER: &str = "warn,codex_bridge_cli=info,codex_bridge_core=info";
@@ -89,6 +90,13 @@ async fn main() -> Result<()> {
 async fn run_command(config: RuntimeConfig) -> Result<()> {
     let project_root = project_root()?;
     let prepared = launcher::prepare_launch(&project_root, &config).await?;
+    info!(
+        project_root = %project_root.display(),
+        api_bind = %config.api_bind,
+        websocket_host = %config.websocket_host,
+        websocket_port = config.websocket_port,
+        "starting codex-bridge runtime"
+    );
     let (command_tx, command_rx) = mpsc::channel(64);
     let (control_tx, control_rx) = mpsc::channel(64);
     let state = ServiceState::with_control_and_reply_context(
@@ -121,6 +129,7 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         ))
         .await?,
     );
+    info!("codex runtime ready");
     let orchestrator_config = orchestrator::OrchestratorConfig {
         queue_capacity: config.queue_capacity,
         repo_root: project_root.clone(),

@@ -5,15 +5,17 @@ use std::path::PathBuf;
 use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, CommandExecutionApprovalDecision,
     CommandExecutionRequestApprovalParams, FileChangeApprovalDecision,
-    FileChangeRequestApprovalParams, ReadOnlyAccess, SandboxPolicy, Turn, TurnError, TurnStatus,
+    FileChangeRequestApprovalParams, ItemStartedNotification, ReadOnlyAccess,
+    ReasoningTextDeltaNotification, SandboxPolicy, ServerNotification, Turn, TurnError,
+    TurnStartedNotification, TurnStatus,
 };
 use codex_bridge_core::{
     approval_guard::ApprovalGuard,
     codex_runtime::{
         build_codex_app_server_command, build_command_approval_response,
         build_file_change_approval_response, build_thread_resume_params, build_thread_start_params,
-        build_turn_interrupt_params, build_turn_start_params, extract_final_reply,
-        summarize_turn_result,
+        build_turn_interrupt_params, build_turn_start_params, describe_server_notification,
+        extract_final_reply, summarize_turn_result,
     },
     system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION},
 };
@@ -229,5 +231,53 @@ fn summarize_turn_result_uses_interrupted_summary_when_needed() {
     assert_eq!(
         summarize_turn_result(&turn, &[]),
         Some("任务因服务重启或异常中断。可使用 /retry_last 重试。".to_string())
+    );
+}
+
+#[test]
+fn describe_server_notification_summarizes_turn_start_and_item_start() {
+    let turn_started = ServerNotification::TurnStarted(TurnStartedNotification {
+        thread_id: "thread-1".to_string(),
+        turn: Turn {
+            id: "turn-1".to_string(),
+            items: vec![],
+            status: TurnStatus::InProgress,
+            error: None,
+        },
+    });
+    let item_started = ServerNotification::ItemStarted(ItemStartedNotification {
+        item: serde_json::from_value(json!({
+            "type": "agentMessage",
+            "id": "item-1",
+            "text": "hello"
+        }))
+        .expect("thread item"),
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+    });
+
+    assert_eq!(
+        describe_server_notification(&turn_started),
+        Some("turn started: thread=thread-1 turn=turn-1 status=in_progress".to_string())
+    );
+    assert_eq!(
+        describe_server_notification(&item_started),
+        Some("item started: thread=thread-1 turn=turn-1 item=item-1 type=agentMessage".to_string())
+    );
+}
+
+#[test]
+fn describe_server_notification_redacts_reasoning_deltas() {
+    let reasoning = ServerNotification::ReasoningTextDelta(ReasoningTextDeltaNotification {
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        item_id: "item-9".to_string(),
+        delta: "private reasoning".to_string(),
+        content_index: 0,
+    });
+
+    assert_eq!(
+        describe_server_notification(&reasoning),
+        Some("reasoning delta received (hidden)".to_string())
     );
 }
