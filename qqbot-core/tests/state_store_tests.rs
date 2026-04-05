@@ -3,7 +3,10 @@
 use qqbot_core::{
     state_store::{ConversationBinding, TaskStatus, StateStore},
     system_prompt::SYSTEM_PROMPT_VERSION,
+    system_prompt::SYSTEM_PROMPT_TEXT,
 };
+use rusqlite::Connection;
+use tempfile::TempDir;
 
 #[test]
 fn binding_round_trip() {
@@ -81,4 +84,64 @@ fn latest_task_for_conversation_returns_recent() {
 fn system_prompt_version_is_seeded() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
     assert!(store.has_system_prompt_version(SYSTEM_PROMPT_VERSION).expect("query prompt version"));
+}
+
+#[test]
+fn system_prompt_same_version_kept_if_unchanged() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("state.sqlite3");
+
+    let store = StateStore::open(&path).expect("initialize state");
+    let first = store
+        .system_prompt_text_for(SYSTEM_PROMPT_VERSION)
+        .expect("read prompt version text")
+        .expect("version exists");
+    drop(store);
+
+    let reopened = StateStore::open(&path).expect("reopen state");
+    let second = reopened
+        .system_prompt_text_for(SYSTEM_PROMPT_VERSION)
+        .expect("read prompt version text")
+        .expect("version exists");
+
+    assert_eq!(first, second);
+    assert_eq!(second, SYSTEM_PROMPT_TEXT);
+}
+
+#[test]
+fn system_prompt_same_version_with_different_text_fails() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("state.sqlite3");
+
+    let store = StateStore::open(&path).expect("initialize state");
+    drop(store);
+
+    let conn = Connection::open(&path).expect("open sqlite db");
+    conn.execute(
+        "UPDATE system_prompt_versions SET prompt_text = ?1 WHERE version = ?2",
+        [&"corrupted prompt", SYSTEM_PROMPT_VERSION],
+    )
+    .expect("corrupt prompt text");
+
+    let reopened = StateStore::open(&path);
+    assert!(
+        reopened.is_err(),
+        "expected reopening to fail when prompt text changed for same version"
+    );
+}
+
+#[test]
+fn state_store_open_fails_on_newer_schema() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("state.sqlite3");
+
+    let conn = Connection::open(&path).expect("open sqlite db");
+    conn.execute_batch("PRAGMA user_version = 2;")
+        .expect("set newer schema version");
+
+    let reopened = StateStore::open(&path);
+    assert!(
+        reopened.is_err(),
+        "expected error when schema version is newer than supported"
+    );
 }

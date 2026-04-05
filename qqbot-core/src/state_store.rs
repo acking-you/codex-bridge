@@ -244,11 +244,17 @@ impl StateStore {
         Ok(text)
     }
 
-    fn migrate_and_seed(&mut self) -> Result<()> {
+fn migrate_and_seed(&mut self) -> Result<()> {
         let current_version: i32 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
             .context("read sqlite user_version")?;
+        if current_version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported sqlite schema version {current_version} (max supported {CURRENT_SCHEMA_VERSION})"
+            );
+        }
+
         if current_version < CURRENT_SCHEMA_VERSION {
             let tx = self.conn.transaction().context("start migration transaction")?;
             tx.execute_batch(
@@ -289,13 +295,30 @@ impl StateStore {
     }
 
     fn seed_current_system_prompt_version(&self) -> Result<()> {
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT prompt_text FROM system_prompt_versions WHERE version = ?1",
+                [SYSTEM_PROMPT_VERSION],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("read existing system prompt version row")?;
+
+        if let Some(existing) = existing {
+            if existing != SYSTEM_PROMPT_TEXT {
+                anyhow::bail!(
+                    "system prompt text changed for existing version {}",
+                    SYSTEM_PROMPT_VERSION
+                );
+            }
+            return Ok(());
+        }
+
         self.conn
             .execute(
                 "INSERT INTO system_prompt_versions (version, prompt_text, created_at)
-                   VALUES (?1, ?2, strftime('%s', 'now'))
-                   ON CONFLICT(version) DO UPDATE SET
-                     prompt_text = excluded.prompt_text,
-                     created_at = excluded.created_at",
+                   VALUES (?1, ?2, strftime('%s', 'now'))",
                 params![SYSTEM_PROMPT_VERSION, SYSTEM_PROMPT_TEXT],
             )
             .context("seed current system prompt version")?;
