@@ -1,6 +1,6 @@
 //! Thin stdio runtime wrapper for `codex app-server`.
 
-use std::{collections::VecDeque, path::PathBuf, process::Stdio};
+use std::{collections::VecDeque, path::PathBuf, process::Stdio, sync::Mutex as StdMutex};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -12,8 +12,8 @@ use codex_app_server_protocol::{
     InitializeParams, InitializeResponse, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
     JSONRPCResponse, ReadOnlyAccess, RequestId, SandboxMode, SandboxPolicy, ServerNotification,
     ServerRequest, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, Turn, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnStatus, UserInput,
+    ThreadStartResponse, Turn, TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnStatus,
+    UserInput,
 };
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
@@ -58,11 +58,37 @@ impl CodexRuntimeConfig {
 }
 
 #[derive(Debug)]
-struct RuntimeProtocolState {
-    child: Child,
-    stdin: BufWriter<ChildStdin>,
+struct RuntimeReadState {
     stdout: BufReader<ChildStdout>,
     pending_notifications: VecDeque<JSONRPCNotification>,
+}
+
+#[derive(Debug)]
+struct RuntimeWriteState {
+    stdin: BufWriter<ChildStdin>,
+}
+
+#[derive(Debug)]
+struct ChildGuard {
+    child: StdMutex<Option<Child>>,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self {
+            child: StdMutex::new(Some(child)),
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            if let Some(child) = child.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+    }
 }
 
 /// Final outcome returned from a codex turn.
@@ -88,6 +114,15 @@ struct TurnCompletion {
     items: Vec<Value>,
 }
 
+/// Active turn identity returned immediately after `turn/start`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTurn {
+    /// Thread id that owns this turn.
+    pub thread_id: String,
+    /// Active turn id allocated by the app-server.
+    pub turn_id: String,
+}
+
 /// Minimal interface for codex execution runtimes.
 #[async_trait]
 pub trait CodexExecutor: Send + Sync {
@@ -98,8 +133,17 @@ pub trait CodexExecutor: Send + Sync {
         existing_thread_id: Option<&str>,
     ) -> Result<String>;
 
+    /// Start a turn and return the active turn identity immediately.
+    async fn start_turn(&self, thread_id: &str, input_text: &str) -> Result<ActiveTurn>;
+
+    /// Wait until an active turn reaches a terminal state.
+    async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult>;
+
     /// Run a turn and return a summary result.
-    async fn run_turn(&self, thread_id: &str, input_text: &str) -> Result<CodexTurnResult>;
+    async fn run_turn(&self, thread_id: &str, input_text: &str) -> Result<CodexTurnResult> {
+        let active_turn = self.start_turn(thread_id, input_text).await?;
+        self.wait_for_turn(&active_turn).await
+    }
 
     /// Interrupt a running turn when supported.
     async fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<()>;
@@ -109,7 +153,9 @@ pub trait CodexExecutor: Send + Sync {
 /// process.
 #[derive(Debug)]
 pub struct CodexRuntime {
-    state: Mutex<RuntimeProtocolState>,
+    _child: ChildGuard,
+    read_state: Mutex<RuntimeReadState>,
+    write_state: Mutex<RuntimeWriteState>,
     config: CodexRuntimeConfig,
     guard: ApprovalGuard,
     next_request_id: Mutex<u64>,
@@ -118,9 +164,11 @@ pub struct CodexRuntime {
 impl CodexRuntime {
     /// Create and initialize a runtime connected to a local app-server process.
     pub async fn new(config: CodexRuntimeConfig) -> Result<Self> {
-        let state = RuntimeProtocolState::spawn(&config).await?;
+        let (child, write_state, read_state) = spawn_protocol_state(&config).await?;
         let runtime = Self {
-            state: Mutex::new(state),
+            _child: ChildGuard::new(child),
+            read_state: Mutex::new(read_state),
+            write_state: Mutex::new(write_state),
             guard: ApprovalGuard::new(&config.workspace_root),
             config,
             next_request_id: Mutex::new(1),
@@ -162,11 +210,10 @@ impl CodexRuntime {
     }
 
     async fn send_notification(&self, notification: ClientNotification) -> Result<()> {
-        let mut state = self.state.lock().await;
         let value = serde_json::to_value(notification).context("serialize client notification")?;
         let notification: JSONRPCNotification =
             serde_json::from_value(value).context("convert client notification to json-rpc")?;
-        state.write_message(notification).await
+        self.write_message(notification).await
     }
 
     async fn send_request<T>(
@@ -178,9 +225,9 @@ impl CodexRuntime {
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let mut state = self.state.lock().await;
         let request = client_request_to_jsonrpc(request)?;
-        state.write_message(request).await?;
+        self.write_message(request).await?;
+        let mut state = self.read_state.lock().await;
 
         loop {
             match state.read_message().await? {
@@ -198,18 +245,14 @@ impl CodexRuntime {
                     state.pending_notifications.push_back(notification);
                 },
                 JSONRPCMessage::Request(request) => {
-                    self.handle_server_request(&mut state, request).await?;
+                    self.handle_server_request(request).await?;
                 },
                 JSONRPCMessage::Response(_) | JSONRPCMessage::Error(_) => {},
             }
         }
     }
 
-    async fn handle_server_request(
-        &self,
-        state: &mut RuntimeProtocolState,
-        request: JSONRPCRequest,
-    ) -> Result<()> {
+    async fn handle_server_request(&self, request: JSONRPCRequest) -> Result<()> {
         let request = ServerRequest::try_from(request).context("decode server request")?;
         match request {
             ServerRequest::CommandExecutionRequestApproval {
@@ -217,18 +260,17 @@ impl CodexRuntime {
                 params,
             } => {
                 let response = build_command_approval_response(&self.guard, &params);
-                state.write_response(request_id, response).await?;
+                self.write_response(request_id, response).await?;
             },
             ServerRequest::FileChangeRequestApproval {
                 request_id,
                 params,
             } => {
-                state
-                    .write_response(
-                        request_id,
-                        build_file_change_approval_response(&self.guard, &params),
-                    )
-                    .await?;
+                self.write_response(
+                    request_id,
+                    build_file_change_approval_response(&self.guard, &params),
+                )
+                .await?;
             },
             other => {
                 return Err(anyhow!("unsupported server request: {other:?}"));
@@ -239,7 +281,7 @@ impl CodexRuntime {
 
     async fn wait_for_turn_completion(
         &self,
-        state: &mut RuntimeProtocolState,
+        state: &mut RuntimeReadState,
         thread_id: &str,
         turn_id: &str,
     ) -> Result<TurnCompletion> {
@@ -277,7 +319,7 @@ impl CodexRuntime {
                     }
                 },
                 JSONRPCMessage::Request(request) => {
-                    self.handle_server_request(state, request).await?;
+                    self.handle_server_request(request).await?;
                 },
                 JSONRPCMessage::Response(_) | JSONRPCMessage::Error(_) => {},
             }
@@ -289,6 +331,22 @@ impl CodexRuntime {
         let id = *next;
         *next += 1;
         RequestId::String(format!("qqbot-{id}"))
+    }
+
+    async fn write_message<T>(&self, message: T) -> Result<()>
+    where
+        T: serde::Serialize,
+    {
+        let mut state = self.write_state.lock().await;
+        state.write_message(message).await
+    }
+
+    async fn write_response<T>(&self, request_id: RequestId, response: T) -> Result<()>
+    where
+        T: serde::Serialize,
+    {
+        let mut state = self.write_state.lock().await;
+        state.write_response(request_id, response).await
     }
 }
 
@@ -325,7 +383,7 @@ impl CodexExecutor for CodexRuntime {
         }
     }
 
-    async fn run_turn(&self, thread_id: &str, input_text: &str) -> Result<CodexTurnResult> {
+    async fn start_turn(&self, thread_id: &str, input_text: &str) -> Result<ActiveTurn> {
         let request_id = self.next_request_id().await;
         let request = ClientRequest::TurnStart {
             request_id: request_id.clone(),
@@ -334,9 +392,16 @@ impl CodexExecutor for CodexRuntime {
         let response: TurnStartResponse =
             self.send_request(request, request_id, "turn/start").await?;
 
-        let mut state = self.state.lock().await;
+        Ok(ActiveTurn {
+            thread_id: thread_id.to_string(),
+            turn_id: response.turn.id,
+        })
+    }
+
+    async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult> {
+        let mut state = self.read_state.lock().await;
         let completion = self
-            .wait_for_turn_completion(&mut state, thread_id, &response.turn.id)
+            .wait_for_turn_completion(&mut state, &active_turn.thread_id, &active_turn.turn_id)
             .await?;
         let final_reply = summarize_turn_result(&completion.turn, &completion.items);
         let error_message = completion
@@ -346,8 +411,8 @@ impl CodexExecutor for CodexRuntime {
             .map(|error| error.message.clone());
 
         Ok(CodexTurnResult {
-            thread_id: thread_id.to_string(),
-            turn_id: response.turn.id,
+            thread_id: active_turn.thread_id.clone(),
+            turn_id: active_turn.turn_id.clone(),
             status: completion.turn.status.clone(),
             error_message,
             items: completion.items,
@@ -361,50 +426,55 @@ impl CodexExecutor for CodexRuntime {
             request_id: request_id.clone(),
             params: build_turn_interrupt_params(thread_id, turn_id),
         };
-        let _: TurnInterruptResponse = self
-            .send_request(request, request_id, "turn/interrupt")
-            .await?;
+        let request = client_request_to_jsonrpc(request)?;
+        self.write_message(request).await?;
         Ok(())
     }
 }
 
-impl RuntimeProtocolState {
-    async fn spawn(config: &CodexRuntimeConfig) -> Result<Self> {
-        let manifest_path = config.codex_repo_root.join("Cargo.toml");
-        let mut child = Command::new("cargo")
-            .arg("run")
-            .arg("--manifest-path")
-            .arg(&manifest_path)
-            .arg("-p")
-            .arg("codex-app-server")
-            .arg("--")
-            .arg("--listen")
-            .arg("stdio://")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| {
-                format!("spawn codex-app-server via manifest {}", manifest_path.display())
-            })?;
+async fn spawn_protocol_state(
+    config: &CodexRuntimeConfig,
+) -> Result<(Child, RuntimeWriteState, RuntimeReadState)> {
+    let manifest_path = config.codex_repo_root.join("Cargo.toml");
+    let mut child = Command::new("cargo")
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .arg("-p")
+        .arg("codex-app-server")
+        .arg("--")
+        .arg("--listen")
+        .arg("stdio://")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| {
+            format!("spawn codex-app-server via manifest {}", manifest_path.display())
+        })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .context("capture codex-app-server stdin")?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("capture codex-app-server stdout")?;
+    let stdin = child
+        .stdin
+        .take()
+        .context("capture codex-app-server stdin")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("capture codex-app-server stdout")?;
 
-        Ok(Self {
-            child,
+    Ok((
+        child,
+        RuntimeWriteState {
             stdin: BufWriter::new(stdin),
+        },
+        RuntimeReadState {
             stdout: BufReader::new(stdout),
             pending_notifications: VecDeque::new(),
-        })
-    }
+        },
+    ))
+}
 
+impl RuntimeWriteState {
     async fn write_message<T>(&mut self, message: T) -> Result<()>
     where
         T: serde::Serialize,
@@ -426,7 +496,9 @@ impl RuntimeProtocolState {
         })
         .await
     }
+}
 
+impl RuntimeReadState {
     async fn read_message(&mut self) -> Result<JSONRPCMessage> {
         let mut line = String::new();
         loop {
@@ -445,12 +517,6 @@ impl RuntimeProtocolState {
                 serde_json::from_str(trimmed).context("decode json-rpc payload")?;
             return serde_json::from_value(payload).context("decode json-rpc message");
         }
-    }
-}
-
-impl Drop for RuntimeProtocolState {
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
     }
 }
 

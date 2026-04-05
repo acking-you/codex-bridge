@@ -98,20 +98,14 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     });
 
     let codex_state = state.clone();
-    let _store = Arc::new(Mutex::new(StateStore::open(&prepared.paths.database_path)?));
-    let (event_tx, event_rx) = mpsc::channel(256);
-    let mut event_sub = codex_state.subscribe_events();
-    tokio::spawn(async move {
-        while let Ok(event) = event_sub.recv().await {
-            let _ = event_tx.send(event).await;
-        }
-    });
+    let store = Arc::new(Mutex::new(StateStore::open(&prepared.paths.database_path)?));
     let codex = Arc::new(
         CodexRuntime::new(CodexRuntimeConfig::new(codex_repo_root(), project_root.clone())).await?,
     );
+    let queue_capacity = config.queue_capacity;
     tokio::spawn(async move {
         if let Err(error) =
-            orchestrator::run(codex_state, event_rx, control_rx, codex.as_ref()).await
+            orchestrator::run(codex_state, control_rx, codex, store, queue_capacity).await
         {
             eprintln!("orchestrator stopped: {error:#}");
         }

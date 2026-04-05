@@ -79,6 +79,7 @@ async fn status_route_returns_running_snapshot_and_prompt_version() {
             running_summary: Some("正在执行".to_string()),
             queue_len: 2,
             last_terminal_summary: Some("已完成".to_string()),
+            last_retryable_conversation_key: None,
             prompt_version: Some("2026-04-05".to_string()),
         })
         .await;
@@ -166,6 +167,30 @@ async fn retry_last_route_sends_when_running_conversation_exists() {
     state
         .set_task_snapshot(TaskSnapshot {
             running_conversation_key: Some("private:42".to_string()),
+            ..TaskSnapshot::default()
+        })
+        .await;
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/tasks/retry-last")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("retry response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn retry_last_route_uses_last_retryable_conversation_when_idle() {
+    let state = ServiceState::for_tests();
+    state
+        .set_task_snapshot(TaskSnapshot {
+            last_retryable_conversation_key: Some("private:42".to_string()),
             ..TaskSnapshot::default()
         })
         .await;

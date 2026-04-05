@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::system_prompt::{SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_VERSION};
 
 /// State schema migration level.
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 /// Task lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub struct ConversationBinding {
     /// External conversation identifier (e.g. source message thread id).
     pub conversation_key: String,
     /// Bot runtime thread id bound to this conversation.
-    pub thread_id: i64,
+    pub thread_id: String,
     /// System prompt version this conversation expects.
     pub prompt_version: String,
 }
@@ -170,6 +170,22 @@ impl StateStore {
         Ok(task_id)
     }
 
+    /// Update the status of an existing task row.
+    pub fn update_task_status(&self, task_id: &str, status: TaskStatus) -> Result<()> {
+        let updated = self
+            .conn
+            .execute("UPDATE task_runs SET status = ?1 WHERE task_id = ?2", params![
+                status.as_str(),
+                task_id
+            ])
+            .context("update task status")?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            anyhow::bail!("task record {task_id} not found for status update");
+        }
+    }
+
     /// Return the latest task for a conversation, or `None` if absent.
     pub fn latest_task_for_conversation(
         &self,
@@ -252,41 +268,24 @@ impl StateStore {
             );
         }
 
-        if current_version < CURRENT_SCHEMA_VERSION {
+        if current_version == 0 {
             let tx = self
                 .conn
                 .transaction()
                 .context("start migration transaction")?;
-            tx.execute_batch(
-                "CREATE TABLE conversation_bindings (
-                    conversation_key TEXT PRIMARY KEY,
-                    thread_id INTEGER NOT NULL,
-                    prompt_version TEXT NOT NULL
-                );
-                CREATE TABLE task_runs (
-                    task_id TEXT PRIMARY KEY,
-                    conversation_key TEXT NOT NULL,
-                    thread_id INTEGER NOT NULL,
-                    prompt_version TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-                );
-                CREATE TABLE bot_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE system_prompt_versions (
-                    version TEXT PRIMARY KEY,
-                    prompt_text TEXT NOT NULL,
-                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-                );
-                CREATE INDEX IF NOT EXISTS task_runs_by_conversation_created
-                    ON task_runs (conversation_key, created_at)",
-            )
-            .context("run initial migration")?;
-            tx.execute_batch("PRAGMA user_version = 1")
+            run_initial_migration(&tx).context("run initial migration")?;
+            tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
                 .context("write sqlite schema version")?;
             tx.commit().context("commit migration")?;
+        } else if current_version == 1 {
+            let tx = self
+                .conn
+                .transaction()
+                .context("start v1 to v2 migration transaction")?;
+            migrate_v1_to_v2(&tx).context("migrate sqlite schema from v1 to v2")?;
+            tx.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
+                .context("write sqlite schema version")?;
+            tx.commit().context("commit v1 to v2 migration")?;
         }
 
         self.seed_current_system_prompt_version()
@@ -324,4 +323,70 @@ impl StateStore {
             .context("seed current system prompt version")?;
         Ok(())
     }
+}
+
+fn run_initial_migration(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE conversation_bindings (
+            conversation_key TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL
+        );
+        CREATE TABLE task_runs (
+            task_id TEXT PRIMARY KEY,
+            conversation_key TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE TABLE bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE system_prompt_versions (
+            version TEXT PRIMARY KEY,
+            prompt_text TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE INDEX IF NOT EXISTS task_runs_by_conversation_created
+            ON task_runs (conversation_key, created_at)",
+    )
+    .context("apply v2 schema")
+}
+
+fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE conversation_bindings RENAME TO conversation_bindings_v1;
+        CREATE TABLE conversation_bindings (
+            conversation_key TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL
+        );
+        INSERT INTO conversation_bindings (conversation_key, thread_id, prompt_version)
+            SELECT conversation_key, CAST(thread_id AS TEXT), prompt_version
+            FROM conversation_bindings_v1;
+        DROP TABLE conversation_bindings_v1;
+
+        ALTER TABLE task_runs RENAME TO task_runs_v1;
+        CREATE TABLE task_runs (
+            task_id TEXT PRIMARY KEY,
+            conversation_key TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        INSERT INTO task_runs (task_id, conversation_key, thread_id, prompt_version, status, \
+         created_at)
+            SELECT task_id, conversation_key, CAST(thread_id AS TEXT), prompt_version, status, \
+         created_at
+            FROM task_runs_v1;
+        DROP TABLE task_runs_v1;
+
+        DROP INDEX IF EXISTS task_runs_by_conversation_created;
+        CREATE INDEX task_runs_by_conversation_created
+            ON task_runs (conversation_key, created_at);",
+    )
+    .context("rewrite v1 integer thread ids to text")
 }

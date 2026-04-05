@@ -219,7 +219,7 @@ async fn retry_last_handler(
     State(state): State<ServiceState>,
 ) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
     let snapshot = state.task_snapshot().await;
-    let command = command_from_snapshot(&snapshot, ControlCommand::RetryLast)?;
+    let command = retry_command_from_snapshot(&snapshot)?;
     state
         .send_control_command(command)
         .await
@@ -269,6 +269,26 @@ fn command_from_snapshot(
 
     Ok(CommandRequest {
         command,
+        conversation_key: conversation_key.to_string(),
+        reply_target_id: target,
+        is_group,
+    })
+}
+
+fn retry_command_from_snapshot(
+    snapshot: &TaskSnapshot,
+) -> Result<CommandRequest, (StatusCode, Json<ErrorResponse>)> {
+    let conversation_key = snapshot
+        .running_conversation_key
+        .as_deref()
+        .or(snapshot.last_retryable_conversation_key.as_deref())
+        .ok_or_else(|| bad_request("missing retryable conversation context"))?;
+
+    let (is_group, target) = parse_conversation_command_target(conversation_key)
+        .ok_or_else(|| bad_request("missing retryable conversation context"))?;
+
+    Ok(CommandRequest {
+        command: ControlCommand::RetryLast,
         conversation_key: conversation_key.to_string(),
         reply_target_id: target,
         is_group,

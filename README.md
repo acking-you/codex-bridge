@@ -6,8 +6,9 @@ It does three things:
 
 - launches Linux QQ in the foreground,
 - keeps a local receive/send bridge through the injected NapCat runtime,
+- runs a single Codex task queue over formal OneBot WebSocket messages,
 - exposes a small local HTTP/WebSocket API so your own code can subscribe to
-  messages and send replies.
+  messages, inspect runtime state, and send replies.
 
 ## What This Project Is Not
 
@@ -45,7 +46,8 @@ What happens:
 3. QQ is patched to load the local shell build,
 4. QQ starts in the foreground,
 5. the terminal prints QQ/NapCat logs and the text QR code,
-6. after you scan the QR code, the local API becomes usable.
+6. a local `codex app-server` child is started over `stdio`,
+7. after you scan the QR code, the local API becomes usable.
 
 ## Local API
 
@@ -61,6 +63,10 @@ Routes:
 - `GET /api/session`
 - `GET /api/friends`
 - `GET /api/groups`
+- `GET /api/status`
+- `GET /api/queue`
+- `POST /api/tasks/cancel`
+- `POST /api/tasks/retry-last`
 - `POST /api/messages/private`
 - `POST /api/messages/group`
 - `GET /api/events/ws`
@@ -102,6 +108,26 @@ Events are normalized JSON objects. Group and private messages include:
 - whether the bot account was mentioned,
 - the original raw JSON payload.
 
+## Persistence
+
+Runtime state is stored under:
+
+```text
+codex-bridge/.run/default/
+```
+
+Important files:
+
+- `state.sqlite3`: conversation-to-thread bindings, task history, and prompt versions
+- `run/launcher.env`: generated WebUI and OneBot tokens
+- `logs/launcher.log`: foreground QQ/NapCat launcher log
+
+Restart behavior:
+
+- conversation bindings are kept,
+- the currently running task is marked interrupted,
+- queued tasks are not auto-resumed after restart.
+
 ## CLI Shortcuts
 
 Start the bridge:
@@ -128,6 +154,38 @@ Query cached contacts:
 cargo run -p codex-bridge -- friends
 cargo run -p codex-bridge -- groups
 ```
+
+Query the current orchestrator state:
+
+```bash
+cargo run -p codex-bridge -- status
+cargo run -p codex-bridge -- queue
+```
+
+Send local control commands:
+
+```bash
+cargo run -p codex-bridge -- cancel
+cargo run -p codex-bridge -- retry-last
+```
+
+Current behavior:
+
+- `cancel` sends a real `turn/interrupt` request to the active Codex turn and waits for the task to reach `interrupted`.
+
+## Trigger Rules
+
+- Private chat text messages always trigger Codex work.
+- Group messages trigger only when they `@` the bot.
+- Control commands: `/status`, `/queue`, `/cancel`, `/retry_last`.
+- Only one Codex task runs at a time, with a bounded waiting queue behind it.
+
+## Safety
+
+- Codex runs only inside the current project root.
+- Web search is allowed.
+- `kill`, `pkill`, `killall`, `shutdown`, `reboot`, and service-stop commands are denied.
+- `thread/shellCommand` is never used.
 
 ## Developer Commands
 

@@ -23,7 +23,7 @@ fn binding_round_trip() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
     let binding = ConversationBinding {
         conversation_key: "conv-1".to_string(),
-        thread_id: 100,
+        thread_id: "thr-100".to_string(),
         prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
@@ -41,7 +41,7 @@ fn running_task_marks_interrupted() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
     let binding = ConversationBinding {
         conversation_key: "conv-2".to_string(),
-        thread_id: 200,
+        thread_id: "thr-200".to_string(),
         prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
@@ -64,11 +64,41 @@ fn running_task_marks_interrupted() {
 }
 
 #[test]
+fn updated_task_status_is_not_recovered_as_running() {
+    let store = StateStore::open_in_memory().expect("open in-memory store");
+    let binding = ConversationBinding {
+        conversation_key: "conv-2b".to_string(),
+        thread_id: "thr-250".to_string(),
+        prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
+    };
+
+    store.upsert_binding(&binding).expect("upsert binding");
+    let task_id = store
+        .insert_task(&binding, TaskStatus::Running)
+        .expect("insert running task");
+    store
+        .update_task_status(&task_id, TaskStatus::Completed)
+        .expect("update task status");
+
+    let interrupted = store
+        .mark_running_tasks_interrupted()
+        .expect("mark running interrupted");
+    assert_eq!(interrupted, 0);
+
+    let latest = store
+        .latest_task_for_conversation("conv-2b")
+        .expect("query latest task")
+        .expect("task exists");
+    assert_eq!(latest.task_id, task_id);
+    assert_eq!(latest.status, TaskStatus::Completed);
+}
+
+#[test]
 fn latest_task_for_conversation_returns_recent() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
     let binding = ConversationBinding {
         conversation_key: "conv-3".to_string(),
-        thread_id: 300,
+        thread_id: "thr-300".to_string(),
         prompt_version: SYSTEM_PROMPT_VERSION.to_string(),
     };
 
@@ -180,11 +210,21 @@ fn legacy_system_prompt_version_remains_and_current_version_is_seeded() {
         (&LEGACY_SYSTEM_PROMPT_VERSION, &LEGACY_SYSTEM_PROMPT_TEXT),
     )
     .expect("insert legacy prompt row");
+    conn.execute(
+        "INSERT INTO conversation_bindings (conversation_key, thread_id, prompt_version) VALUES \
+         (?1, ?2, ?3)",
+        ("conv-legacy", 777, LEGACY_SYSTEM_PROMPT_VERSION),
+    )
+    .expect("insert legacy binding row");
     conn.execute_batch("PRAGMA user_version = 1")
         .expect("set legacy schema version");
     drop(conn);
 
     let store = StateStore::open(&path).expect("open legacy db");
+    let legacy_binding = store
+        .binding("conv-legacy")
+        .expect("read legacy binding after migration")
+        .expect("legacy binding exists");
 
     let legacy = store
         .system_prompt_text_for(LEGACY_SYSTEM_PROMPT_VERSION)
@@ -197,6 +237,7 @@ fn legacy_system_prompt_version_remains_and_current_version_is_seeded() {
 
     assert_eq!(legacy, LEGACY_SYSTEM_PROMPT_TEXT);
     assert_eq!(current, SYSTEM_PROMPT_TEXT);
+    assert_eq!(legacy_binding.thread_id, "777");
 }
 
 #[test]
@@ -205,7 +246,7 @@ fn state_store_open_fails_on_newer_schema() {
     let path = tempdir.path().join("state.sqlite3");
 
     let conn = Connection::open(&path).expect("open sqlite db");
-    conn.execute_batch("PRAGMA user_version = 2;")
+    conn.execute_batch("PRAGMA user_version = 3;")
         .expect("set newer schema version");
 
     let reopened = StateStore::open(&path);
