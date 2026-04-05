@@ -17,6 +17,10 @@ pub enum NormalizeEventError {
 pub struct PrivateMessageEvent {
     /// Sender QQ identifier.
     pub sender_id: i64,
+    /// Message identifier from OneBot event.
+    pub message_id: i64,
+    /// Sender display name.
+    pub sender_name: String,
     /// Bot QQ identifier.
     pub self_id: i64,
     /// Plain-text projection of the message.
@@ -36,6 +40,10 @@ pub struct GroupMessageEvent {
     pub group_id: i64,
     /// Sender QQ identifier.
     pub sender_id: i64,
+    /// Message identifier from OneBot event.
+    pub message_id: i64,
+    /// Sender display name.
+    pub sender_name: String,
     /// Bot QQ identifier.
     pub self_id: i64,
     /// Plain-text projection of the message.
@@ -73,13 +81,17 @@ impl TryFrom<Value> for NormalizedEvent {
         };
         let sender_id = extract_i64(&value, "user_id")?;
         let self_id = extract_i64(&value, "self_id")?;
+        let message_id = extract_i64(&value, "message_id")?;
         let mentions = extract_mentions(&value);
         let mentions_self = mentions.contains(&self_id);
         let text = extract_text(&value);
+        let sender_name = extract_sender_name(&value);
 
         match message_type {
             "private" => Ok(Self::PrivateMessageReceived(PrivateMessageEvent {
                 sender_id,
+                message_id,
+                sender_name,
                 self_id,
                 text,
                 mentions,
@@ -89,6 +101,8 @@ impl TryFrom<Value> for NormalizedEvent {
             "group" => Ok(Self::GroupMessageReceived(GroupMessageEvent {
                 group_id: extract_i64(&value, "group_id")?,
                 sender_id,
+                message_id,
+                sender_name,
                 self_id,
                 text,
                 mentions,
@@ -134,6 +148,29 @@ fn extract_mentions(value: &Value) -> Vec<i64> {
     }
 
     mentions
+}
+
+fn extract_sender_name(value: &Value) -> String {
+    let sender = value.get("sender").or_else(|| value.get("sender_id"));
+    if let Some(sender) = sender.and_then(Value::as_object) {
+        for key in ["nickname", "card", "user_name", "name"] {
+            let Some(text) = sender.get(key).and_then(Value::as_str) else {
+                continue;
+            };
+            let normalized = text.trim();
+            if !normalized.is_empty() {
+                return normalized.to_string();
+            }
+        }
+    }
+    if let Some(text) = value.get("sender_name").and_then(Value::as_str) {
+        let normalized = text.trim();
+        if !normalized.is_empty() {
+            return normalized.to_string();
+        }
+    }
+
+    "unknown".to_string()
 }
 
 fn extract_text(value: &Value) -> String {

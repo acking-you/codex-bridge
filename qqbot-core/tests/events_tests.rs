@@ -17,6 +17,7 @@ fn group_message_event_extracts_mentions_and_text() {
         "message_type": "group",
         "group_id": 42,
         "user_id": 7,
+        "message_id": 100,
         "self_id": 99,
         "raw_message": "@bot hello",
         "message": [
@@ -31,6 +32,8 @@ fn group_message_event_extracts_mentions_and_text() {
         NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
             group_id,
             sender_id,
+            message_id,
+            sender_name,
             self_id,
             text,
             mentions_self,
@@ -39,8 +42,10 @@ fn group_message_event_extracts_mentions_and_text() {
         }) => {
             assert_eq!(group_id, 42);
             assert_eq!(sender_id, 7);
+            assert_eq!(message_id, 100);
             assert_eq!(self_id, 99);
             assert_eq!(text, "hello");
+            assert_eq!(sender_name, "unknown");
             assert!(mentions_self);
             assert_eq!(mentions, vec![99]);
         },
@@ -54,7 +59,11 @@ fn private_message_event_preserves_raw_text() {
         "post_type": "message",
         "message_type": "private",
         "user_id": 1001,
+        "message_id": 101,
         "self_id": 99,
+        "sender": {
+            "nickname": "alice"
+        },
         "raw_message": "just text",
         "message": [
             { "type": "text", "data": { "text": "just text" } }
@@ -66,13 +75,17 @@ fn private_message_event_preserves_raw_text() {
     match event {
         NormalizedEvent::PrivateMessageReceived(PrivateMessageEvent {
             sender_id,
+            message_id,
+            sender_name,
             self_id,
             text,
             mentions_self,
             ..
         }) => {
             assert_eq!(sender_id, 1001);
+            assert_eq!(message_id, 101);
             assert_eq!(self_id, 99);
+            assert_eq!(sender_name, "alice");
             assert_eq!(text, "just text");
             assert!(!mentions_self);
         },
