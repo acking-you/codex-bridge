@@ -174,6 +174,11 @@ fn extract_sender_name(value: &Value) -> String {
 }
 
 fn extract_text(value: &Value) -> String {
+    let is_group = value
+        .get("message_type")
+        .and_then(Value::as_str)
+        .is_some_and(|message_type| message_type == "group");
+
     if let Some(text) = value
         .get("message")
         .and_then(Value::as_array)
@@ -190,16 +195,33 @@ fn extract_text(value: &Value) -> String {
                         .and_then(Value::as_str)
                 })
                 .collect::<String>()
-        })
-        .filter(|text| !text.trim().is_empty())
-    {
-        return text.trim().to_string();
+        }) {
+        if !text.trim().is_empty() {
+            return text.trim().to_string();
+        }
+
+        if is_group {
+            return strip_group_mentions(value).to_string();
+        }
     }
 
-    value
-        .get("raw_message")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string()
+    let Some(raw_message) = value.get("raw_message").and_then(Value::as_str) else {
+        return String::new();
+    };
+    if is_group {
+        return strip_group_mentions(value).to_string();
+    }
+    raw_message.trim().to_string()
+}
+
+fn strip_group_mentions(value: &Value) -> String {
+    let Some(raw_message) = value.get("raw_message").and_then(Value::as_str) else {
+        return String::new();
+    };
+    let filtered = raw_message
+        .split_whitespace()
+        .filter(|part| !part.starts_with('@'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    filtered.trim().to_string()
 }

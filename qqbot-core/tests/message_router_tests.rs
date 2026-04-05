@@ -73,3 +73,23 @@ fn deduper_returns_false_when_repeated_message_id_seen() {
     assert!(deduper.is_new(111));
     assert!(!deduper.is_new(111));
 }
+
+#[test]
+fn group_mention_only_message_is_ignored() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 1003,
+        "group_id": 777,
+        "user_id": 11,
+        "self_id": 99,
+        "raw_message": "@bot",
+        "message": [
+            { "type": "at", "data": { "qq": "99", "name": "bot" } },
+        ]
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize group message");
+    let mut router = MessageRouter::new();
+
+    assert!(router.route_event(event).is_none());
+}
