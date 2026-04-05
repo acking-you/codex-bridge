@@ -1,0 +1,6 @@
+[submodule "deps/NapCatQQ"]
+	path = deps/NapCatQQ
+	url = git@github.com:acking-you/NapCatQQ.git
+[submodule "deps/codex"]
+	path = deps/codex
+	url = git@github.com:acking-you/codex.git
