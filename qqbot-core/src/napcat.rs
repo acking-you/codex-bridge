@@ -24,9 +24,6 @@ use crate::{
     },
 };
 
-#[path = "message_router.rs"]
-pub mod message_router;
-
 /// OneBot websocket frame consumed by the bridge worker.
 #[derive(Debug)]
 pub enum IncomingFrame {
@@ -164,6 +161,7 @@ pub async fn run_bridge_loop(
                         } => {
                             let _ = respond_to.send(client.send_group_message(group_id, text).await);
                         },
+                        ServiceCommand::Control { .. } => {},
                     },
                     None => {
                         let previous = state.session().await;

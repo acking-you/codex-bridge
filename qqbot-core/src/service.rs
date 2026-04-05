@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tokio::{
+    spawn,
+    sync::{broadcast, mpsc, oneshot, RwLock},
+};
 
-use crate::events::NormalizedEvent;
+use crate::{events::NormalizedEvent, message_router::CommandRequest};
 
 /// Current session lifecycle state exposed by the local API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +114,11 @@ pub enum ServiceCommand {
         /// Response channel for completion.
         respond_to: oneshot::Sender<Result<SendMessageReceipt>>,
     },
+    /// Route an orchestrator control command.
+    Control {
+        /// Payload for a local control command.
+        command: CommandRequest,
+    },
 }
 
 #[derive(Debug)]
@@ -121,6 +129,7 @@ struct ServiceInner {
     task_snapshot: RwLock<TaskSnapshot>,
     events_tx: broadcast::Sender<NormalizedEvent>,
     command_tx: mpsc::Sender<ServiceCommand>,
+    control_tx: mpsc::Sender<ServiceCommand>,
 }
 
 /// Cloneable handle shared across the API layer and runtime worker.
@@ -132,6 +141,25 @@ pub struct ServiceState {
 impl ServiceState {
     /// Build a new service state around the provided command channel.
     pub fn new(command_tx: mpsc::Sender<ServiceCommand>) -> Self {
+        let (control_tx, mut control_rx) = mpsc::channel(64);
+        spawn(async move {
+            while let Some(command) = control_rx.recv().await {
+                let ServiceCommand::Control {
+                    command: _,
+                } = command
+                else {
+                    continue;
+                };
+            }
+        });
+        Self::with_control(command_tx, control_tx)
+    }
+
+    /// Build a service state with a custom control channel.
+    pub fn with_control(
+        command_tx: mpsc::Sender<ServiceCommand>,
+        control_tx: mpsc::Sender<ServiceCommand>,
+    ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(ServiceInner {
@@ -141,6 +169,7 @@ impl ServiceState {
                 task_snapshot: RwLock::new(TaskSnapshot::default()),
                 events_tx,
                 command_tx,
+                control_tx,
             }),
         }
     }
@@ -169,6 +198,9 @@ impl ServiceState {
                             message_id: group_id.saturating_add(text.len() as i64),
                         }));
                     },
+                    ServiceCommand::Control {
+                        command: _,
+                    } => {},
                 }
             }
         });
@@ -265,5 +297,17 @@ impl ServiceState {
         response_rx
             .await
             .map_err(|_| anyhow!("bridge worker dropped the response"))?
+    }
+
+    /// Dispatch a control command to the orchestrator runtime.
+    pub async fn send_control_command(&self, command: CommandRequest) -> Result<()> {
+        self.inner
+            .control_tx
+            .send(ServiceCommand::Control {
+                command,
+            })
+            .await
+            .map_err(|_| anyhow!("orchestrator is not available"))?;
+        Ok(())
     }
 }

@@ -14,7 +14,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::service::{SendMessageReceipt, ServiceState};
+use crate::{
+    message_router::{CommandRequest, ControlCommand},
+    service::{SendMessageReceipt, ServiceState, TaskSnapshot},
+};
 
 /// Build the local API router for the bridge runtime.
 pub fn build_router(state: ServiceState) -> Router {
@@ -23,6 +26,10 @@ pub fn build_router(state: ServiceState) -> Router {
         .route("/api/session", get(session_handler))
         .route("/api/friends", get(friends_handler))
         .route("/api/groups", get(groups_handler))
+        .route("/api/status", get(status_handler))
+        .route("/api/queue", get(queue_handler))
+        .route("/api/tasks/cancel", post(cancel_handler))
+        .route("/api/tasks/retry-last", post(retry_last_handler))
         .route("/api/events/ws", get(events_ws_handler))
         .route("/api/messages/private", post(send_private_handler))
         .route("/api/messages/group", post(send_group_handler))
@@ -50,6 +57,12 @@ struct ErrorResponse {
 struct SendMessageResponse {
     status: &'static str,
     receipt: SendMessageReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct TextResponse {
+    status: &'static str,
+    text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -86,6 +99,48 @@ async fn groups_handler(
     State(state): State<ServiceState>,
 ) -> Json<Vec<crate::service::GroupProfile>> {
     Json(state.groups().await)
+}
+
+async fn status_handler(
+    State(state): State<ServiceState>,
+) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let snapshot = state.task_snapshot().await;
+    let running = snapshot
+        .running_task_id
+        .clone()
+        .unwrap_or_else(|| "无".to_string());
+    let running_conversation = snapshot
+        .running_conversation_key
+        .clone()
+        .unwrap_or_else(|| "无".to_string());
+    let queue_len = snapshot.queue_len;
+    let last = snapshot
+        .last_terminal_summary
+        .clone()
+        .unwrap_or_else(|| "无".to_string());
+    let prompt_version = snapshot
+        .prompt_version
+        .clone()
+        .unwrap_or_else(|| "2026-04-05".to_string());
+    let text = format!(
+        "当前任务：{running}\n会话：{running_conversation}\n排队数量：{queue_len}\n最近结果：\
+         {last}\nPrompt version: {prompt_version}"
+    );
+    Ok(Json(TextResponse {
+        status: "ok",
+        text,
+    }))
+}
+
+async fn queue_handler(
+    State(state): State<ServiceState>,
+) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let snapshot = state.task_snapshot().await;
+    let text = format!("队列中的任务数量：{}", snapshot.queue_len);
+    Ok(Json(TextResponse {
+        status: "ok",
+        text,
+    }))
 }
 
 async fn send_private_handler(
@@ -145,6 +200,36 @@ async fn events_ws_handler(
     })
 }
 
+async fn cancel_handler(
+    State(state): State<ServiceState>,
+) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let snapshot = state.task_snapshot().await;
+    let command = command_from_snapshot(&snapshot, ControlCommand::Cancel)?;
+    state
+        .send_control_command(command)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(TextResponse {
+        status: "ok",
+        text: "cancel sent".to_string(),
+    }))
+}
+
+async fn retry_last_handler(
+    State(state): State<ServiceState>,
+) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let snapshot = state.task_snapshot().await;
+    let command = command_from_snapshot(&snapshot, ControlCommand::RetryLast)?;
+    state
+        .send_control_command(command)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(TextResponse {
+        status: "ok",
+        text: "retry command sent".to_string(),
+    }))
+}
+
 fn bad_request(message: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
@@ -161,4 +246,31 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
             error: error.to_string(),
         }),
     )
+}
+
+fn parse_conversation_command_target(conversation_key: &str) -> Option<(bool, i64)> {
+    let mut parts = conversation_key.split(':');
+    let scope = parts.next()?;
+    let target = parts.next()?.parse::<i64>().ok()?;
+    Some((scope == "group", target))
+}
+
+fn command_from_snapshot(
+    snapshot: &TaskSnapshot,
+    command: ControlCommand,
+) -> Result<CommandRequest, (StatusCode, Json<ErrorResponse>)> {
+    let conversation_key = snapshot
+        .running_conversation_key
+        .as_deref()
+        .ok_or_else(|| bad_request("missing conversation context"))?;
+
+    let (is_group, target) = parse_conversation_command_target(conversation_key)
+        .ok_or_else(|| bad_request("missing conversation context"))?;
+
+    Ok(CommandRequest {
+        command,
+        conversation_key: conversation_key.to_string(),
+        reply_target_id: target,
+        is_group,
+    })
 }

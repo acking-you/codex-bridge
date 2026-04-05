@@ -2,7 +2,7 @@
 
 use qqbot_core::{
     events::NormalizedEvent,
-    napcat::message_router::{
+    message_router::{
         CommandRequest, ControlCommand, MessageDeduper, MessageRouter, RouteDecision,
     },
 };
@@ -30,7 +30,7 @@ fn private_message_routes_to_task_by_default() {
 
     assert_eq!(
         decision,
-        RouteDecision::Task(qqbot_core::napcat::message_router::TaskRequest {
+        RouteDecision::Task(qqbot_core::message_router::TaskRequest {
             conversation_key: "private:10".to_string(),
             source_message_id: 1001,
             source_sender_id: 10,

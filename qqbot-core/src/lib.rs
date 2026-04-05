@@ -9,6 +9,9 @@ pub mod events;
 /// Internal NapCat transport helpers.
 pub mod napcat;
 
+/// Shared routing decisions and command/request models.
+pub mod message_router;
+
 /// Local HTTP/WebSocket API surface.
 pub mod api;
 
@@ -38,3 +41,6 @@ pub mod approval_guard;
 
 /// Codex runtime interfaces and result extraction helpers.
 pub mod codex_runtime;
+
+/// Orchestrator runtime that connects routing and codex execution.
+pub mod orchestrator;
