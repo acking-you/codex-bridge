@@ -35,18 +35,26 @@ pub struct TaskSummary {
 pub enum TaskQueueError {
     /// No more queued slots are available.
     QueueFull,
+    /// A task is already running.
+    AlreadyRunning,
+    /// No running task exists to finish or cancel.
+    NoRunningTask,
+    /// Non-terminal state passed where terminal state is required.
+    NonTerminalState,
 }
 
 /// Single running-task scheduler with bounded waiting queue.
 pub struct Scheduler {
     /// Maximum number of waiting tasks in the queue.
     queue_capacity: usize,
+    /// Maximum number of terminal tasks remembered for retry and status.
+    terminal_history_capacity: usize,
     /// Currently running task.
     running: Option<TaskSummary>,
     /// FIFO queue of waiting tasks.
     queued: VecDeque<TaskSummary>,
     /// Recent terminal task history, newest at end.
-    last_terminal: Vec<TaskSummary>,
+    last_terminal: VecDeque<TaskSummary>,
 }
 
 impl Scheduler {
@@ -54,9 +62,10 @@ impl Scheduler {
     pub fn new(queue_capacity: usize) -> Self {
         Self {
             queue_capacity,
+            terminal_history_capacity: 16,
             running: None,
             queued: VecDeque::new(),
-            last_terminal: Vec::new(),
+            last_terminal: VecDeque::new(),
         }
     }
 
@@ -66,6 +75,9 @@ impl Scheduler {
         task_id: &str,
         conversation_key: &str,
     ) -> Result<(), TaskQueueError> {
+        if self.running.is_some() {
+            return Err(TaskQueueError::AlreadyRunning);
+        }
         self.running = Some(TaskSummary {
             task_id: task_id.to_string(),
             conversation_key: conversation_key.to_string(),
@@ -99,11 +111,14 @@ impl Scheduler {
         &mut self,
         state: TaskState,
         summary: Option<String>,
-    ) -> Option<TaskSummary> {
-        let mut finished = self.running.take()?;
+    ) -> Result<TaskSummary, TaskQueueError> {
+        if !Self::is_terminal_state(state) {
+            return Err(TaskQueueError::NonTerminalState);
+        }
+        let mut finished = self.running.take().ok_or(TaskQueueError::NoRunningTask)?;
         finished.state = state;
         finished.summary = summary;
-        self.last_terminal.push(finished.clone());
+        self.push_terminal(finished.clone());
 
         if let Some(next) = self.queued.pop_front() {
             self.running = Some(TaskSummary {
@@ -112,7 +127,7 @@ impl Scheduler {
             });
         }
 
-        Some(finished)
+        Ok(finished)
     }
 
     /// Append a terminal task snapshot for retry and status views.
@@ -122,13 +137,18 @@ impl Scheduler {
         conversation_key: &str,
         state: TaskState,
         summary: Option<String>,
-    ) {
-        self.last_terminal.push(TaskSummary {
+    ) -> Result<(), TaskQueueError> {
+        if !Self::is_terminal_state(state) {
+            return Err(TaskQueueError::NonTerminalState);
+        }
+
+        self.push_terminal(TaskSummary {
             task_id: task_id.to_string(),
             conversation_key: conversation_key.to_string(),
             state,
             summary,
         });
+        Ok(())
     }
 
     /// Return the latest terminal task candidate for retry in the same
@@ -150,6 +170,16 @@ impl Scheduler {
         self.running.as_ref()
     }
 
+    /// Current terminal history capacity.
+    pub fn terminal_history_capacity(&self) -> usize {
+        self.terminal_history_capacity
+    }
+
+    /// Current terminal history length.
+    pub fn terminal_history_len(&self) -> usize {
+        self.last_terminal.len()
+    }
+
     /// Number of waiting tasks.
     pub fn queue_len(&self) -> usize {
         self.queued.len()
@@ -157,7 +187,7 @@ impl Scheduler {
 
     /// Most recent terminal task snapshot.
     pub fn last_terminal(&self) -> Option<&TaskSummary> {
-        self.last_terminal.last()
+        self.last_terminal.back()
     }
 
     /// Human-readable preview of queued tasks.
@@ -177,7 +207,21 @@ impl Scheduler {
     }
 
     /// Mark the running task as canceled and promote the next queued task.
-    pub fn cancel_running(&mut self) -> Option<TaskSummary> {
+    pub fn cancel_running(&mut self) -> Result<TaskSummary, TaskQueueError> {
         self.finish_running(TaskState::Canceled, Some("用户取消".to_string()))
+    }
+
+    fn is_terminal_state(state: TaskState) -> bool {
+        matches!(
+            state,
+            TaskState::Completed | TaskState::Failed | TaskState::Canceled | TaskState::Interrupted
+        )
+    }
+
+    fn push_terminal(&mut self, task: TaskSummary) {
+        self.last_terminal.push_back(task);
+        if self.last_terminal.len() > self.terminal_history_capacity {
+            let _ = self.last_terminal.pop_front();
+        }
     }
 }
