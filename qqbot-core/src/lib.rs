@@ -32,3 +32,9 @@ pub mod scheduler;
 
 /// Reply formatting helpers for QQ-facing user responses.
 pub mod reply_formatter;
+
+/// Command approval guard used for codex execution paths.
+pub mod approval_guard;
+
+/// Codex runtime interfaces and result extraction helpers.
+pub mod codex_runtime;
