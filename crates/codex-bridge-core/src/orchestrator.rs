@@ -48,7 +48,7 @@ pub struct OrchestratorConfig {
     pub prompt_file: PathBuf,
     /// QQ emoji id used for the group "salute" reaction.
     pub group_start_reaction_emoji_id: String,
-    /// QQ identifier allowed to bypass approval from private chat.
+    /// QQ identifier allowed to bypass approval for task execution.
     pub admin_user_id: i64,
     /// Maximum number of pending approvals held in memory.
     pub pending_approval_capacity: usize,
@@ -580,8 +580,8 @@ async fn send_start_feedback(
     }
 }
 
-fn is_admin_private_task(task: &TaskRequest, admin_user_id: i64) -> bool {
-    !task.is_group && task.source_sender_id == admin_user_id
+fn is_admin_task(task: &TaskRequest, admin_user_id: i64) -> bool {
+    task.source_sender_id == admin_user_id
 }
 
 async fn private_sender_is_friend(state: &ServiceState, task: &TaskRequest) -> bool {
@@ -1072,7 +1072,7 @@ pub async fn run(
                                 },
                                 RouteDecision::Task(task) => {
                                     if !task.is_group
-                                        && !is_admin_private_task(&task, config.admin_user_id)
+                                        && !is_admin_task(&task, config.admin_user_id)
                                         && !private_sender_is_friend(&state, &task).await
                                     {
                                         info!(
@@ -1087,7 +1087,7 @@ pub async fn run(
                                             reply_formatter::format_friend_gate(),
                                         )
                                         .await?;
-                                    } else if !is_admin_private_task(&task, config.admin_user_id) {
+                                    } else if !is_admin_task(&task, config.admin_user_id) {
                                         register_pending_approval(
                                             task,
                                             &replies,

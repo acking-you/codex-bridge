@@ -203,6 +203,30 @@ fn make_private_event(message_id: i64, text: &str) -> NormalizedEvent {
     make_private_event_from(42, "LB", message_id, text)
 }
 
+fn make_group_event_from(
+    sender_id: i64,
+    sender_name: &str,
+    group_id: i64,
+    message_id: i64,
+    text: &str,
+) -> NormalizedEvent {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": message_id,
+        "group_id": group_id,
+        "user_id": sender_id,
+        "self_id": 2993013575i64,
+        "raw_message": format!("@bot {text}"),
+        "message": [
+            { "type": "at", "data": { "qq": "2993013575", "name": "bot" } },
+            { "type": "text", "data": { "text": format!(" {text}") } }
+        ],
+        "sender": { "nickname": sender_name }
+    });
+    NormalizedEvent::try_from(raw).expect("normalize group event")
+}
+
 fn make_command_request_from(sender_id: i64, command: ControlCommand) -> CommandRequest {
     CommandRequest {
         command,
@@ -582,22 +606,7 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
     ));
     wait_for_snapshot_prompt_file(&state).await;
 
-    let raw = serde_json::json!({
-        "post_type": "message",
-        "message_type": "group",
-        "message_id": 5001,
-        "group_id": 777,
-        "user_id": 42,
-        "self_id": 2993013575i64,
-        "raw_message": "@bot 生成一张图",
-        "message": [
-            { "type": "at", "data": { "qq": "2993013575", "name": "bot" } },
-            { "type": "text", "data": { "text": " 生成一张图" } }
-        ],
-        "sender": { "nickname": "alice" }
-    });
-    let event = NormalizedEvent::try_from(raw).expect("normalize group event");
-    state.publish_event(event);
+    state.publish_event(make_group_event_from(42, "alice", 777, 5001, "生成一张图"));
 
     let pending = timeout(Duration::from_secs(1), async {
         loop {
@@ -614,6 +623,15 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
     })
     .await
     .expect("group task pending");
+
+    assert!(
+        sent_messages
+            .lock()
+            .expect("messages")
+            .iter()
+            .any(|text| text.contains("待审批任务：")),
+        "admin private approval notice should be sent for non-admin group requests"
+    );
 
     state
         .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
@@ -637,6 +655,78 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
     })
     .await
     .expect("group salute and fallback reply");
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn admin_group_message_bypasses_approval() {
+    let codex = Arc::new(FakeCodexExecutor::with_status(
+        vec!["thread-admin-group"],
+        "turn-admin-group",
+        TurnStatus::Completed,
+        "",
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_group_event_from(
+        2_394_626_220,
+        "admin",
+        778,
+        5002,
+        "直接执行这个任务",
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let messages = sent_messages.lock().expect("messages").clone();
+            if messages.iter().any(|text| text == "REACTION:5002:282")
+                && messages
+                    .iter()
+                    .any(|text| text == "已经处理完了，但这次没有生成可回传的结果。")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admin group task executed without approval");
+
+    let maybe_task = store
+        .lock()
+        .await
+        .latest_task_for_conversation("group:778")
+        .expect("query admin group task");
+    let task = maybe_task.expect("admin group task exists");
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert!(
+        !sent_messages
+            .lock()
+            .expect("messages")
+            .iter()
+            .any(|text| text.contains("待审批任务：")),
+        "admin group requests must not generate approval notices"
+    );
+    assert_eq!(codex.ensure_thread_calls().await, vec![("group:778".to_string(), None)]);
 
     run_handle.abort();
     bridge_handle.abort();
