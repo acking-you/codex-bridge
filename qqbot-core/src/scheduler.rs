@@ -35,20 +35,12 @@ pub struct TaskSummary {
 pub enum TaskQueueError {
     /// No more queued slots are available.
     QueueFull,
-    /// A task is already running.
-    AlreadyRunning,
-    /// No running task exists to finish or cancel.
-    NoRunningTask,
-    /// Non-terminal state passed where terminal state is required.
-    NonTerminalState,
 }
 
 /// Single running-task scheduler with bounded waiting queue.
 pub struct Scheduler {
     /// Maximum number of waiting tasks in the queue.
     queue_capacity: usize,
-    /// Maximum number of terminal tasks remembered for retry and status.
-    terminal_history_capacity: usize,
     /// Currently running task.
     running: Option<TaskSummary>,
     /// FIFO queue of waiting tasks.
@@ -58,11 +50,13 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// Default capacity for terminal task history snapshots.
+    const DEFAULT_TERMINAL_HISTORY_CAPACITY: usize = 16;
+
     /// Build a scheduler with an explicit queue capacity.
     pub fn new(queue_capacity: usize) -> Self {
         Self {
             queue_capacity,
-            terminal_history_capacity: 16,
             running: None,
             queued: VecDeque::new(),
             last_terminal: VecDeque::new(),
@@ -75,9 +69,7 @@ impl Scheduler {
         task_id: &str,
         conversation_key: &str,
     ) -> Result<(), TaskQueueError> {
-        if self.running.is_some() {
-            return Err(TaskQueueError::AlreadyRunning);
-        }
+        assert!(self.running.is_none(), "attempted to start a task while another task was running");
         self.running = Some(TaskSummary {
             task_id: task_id.to_string(),
             conversation_key: conversation_key.to_string(),
@@ -111,11 +103,12 @@ impl Scheduler {
         &mut self,
         state: TaskState,
         summary: Option<String>,
-    ) -> Result<TaskSummary, TaskQueueError> {
-        if !Self::is_terminal_state(state) {
-            return Err(TaskQueueError::NonTerminalState);
-        }
-        let mut finished = self.running.take().ok_or(TaskQueueError::NoRunningTask)?;
+    ) -> Option<TaskSummary> {
+        assert!(
+            Self::is_terminal_state(state),
+            "attempted to finish with non-terminal state: {state:?}"
+        );
+        let mut finished = self.running.take()?;
         finished.state = state;
         finished.summary = summary;
         self.push_terminal(finished.clone());
@@ -127,7 +120,7 @@ impl Scheduler {
             });
         }
 
-        Ok(finished)
+        Some(finished)
     }
 
     /// Append a terminal task snapshot for retry and status views.
@@ -137,10 +130,11 @@ impl Scheduler {
         conversation_key: &str,
         state: TaskState,
         summary: Option<String>,
-    ) -> Result<(), TaskQueueError> {
-        if !Self::is_terminal_state(state) {
-            return Err(TaskQueueError::NonTerminalState);
-        }
+    ) {
+        assert!(
+            Self::is_terminal_state(state),
+            "attempted to record non-terminal state: {state:?}"
+        );
 
         self.push_terminal(TaskSummary {
             task_id: task_id.to_string(),
@@ -148,7 +142,6 @@ impl Scheduler {
             state,
             summary,
         });
-        Ok(())
     }
 
     /// Return the latest terminal task candidate for retry in the same
@@ -168,16 +161,6 @@ impl Scheduler {
     /// Current running task, if any.
     pub fn running(&self) -> Option<&TaskSummary> {
         self.running.as_ref()
-    }
-
-    /// Current terminal history capacity.
-    pub fn terminal_history_capacity(&self) -> usize {
-        self.terminal_history_capacity
-    }
-
-    /// Current terminal history length.
-    pub fn terminal_history_len(&self) -> usize {
-        self.last_terminal.len()
     }
 
     /// Number of waiting tasks.
@@ -207,7 +190,7 @@ impl Scheduler {
     }
 
     /// Mark the running task as canceled and promote the next queued task.
-    pub fn cancel_running(&mut self) -> Result<TaskSummary, TaskQueueError> {
+    pub fn cancel_running(&mut self) -> Option<TaskSummary> {
         self.finish_running(TaskState::Canceled, Some("用户取消".to_string()))
     }
 
@@ -220,8 +203,24 @@ impl Scheduler {
 
     fn push_terminal(&mut self, task: TaskSummary) {
         self.last_terminal.push_back(task);
-        if self.last_terminal.len() > self.terminal_history_capacity {
+        if self.last_terminal.len() > Self::DEFAULT_TERMINAL_HISTORY_CAPACITY {
             let _ = self.last_terminal.pop_front();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_history_is_bounded() {
+        let mut scheduler = Scheduler::new(2);
+        for index in 0..25 {
+            let state = if index % 2 == 0 { TaskState::Failed } else { TaskState::Interrupted };
+            scheduler.record_terminal_state(&format!("task-{index}"), "private:1", state, None);
+        }
+
+        assert_eq!(scheduler.last_terminal.len(), Scheduler::DEFAULT_TERMINAL_HISTORY_CAPACITY);
     }
 }
