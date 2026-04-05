@@ -1,0 +1,202 @@
+//! Normalized message events produced from raw NapCat websocket payloads.
+
+use serde::Serialize;
+use serde_json::Value;
+use thiserror::Error;
+
+/// Error returned when a raw payload cannot be normalized.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum NormalizeEventError {
+    /// The payload does not represent a supported event type.
+    #[error("unsupported event payload")]
+    Unsupported,
+}
+
+/// A private-message event normalized for local consumers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrivateMessageEvent {
+    /// Sender QQ identifier.
+    pub sender_id: i64,
+    /// Message identifier from OneBot event.
+    pub message_id: i64,
+    /// Sender display name.
+    pub sender_name: String,
+    /// Bot QQ identifier.
+    pub self_id: i64,
+    /// Plain-text projection of the message.
+    pub text: String,
+    /// Mentioned QQ identifiers extracted from message segments.
+    pub mentions: Vec<i64>,
+    /// Whether the message explicitly mentioned the bot account.
+    pub mentions_self: bool,
+    /// Raw JSON payload for debugging.
+    pub raw: Value,
+}
+
+/// A group-message event normalized for local consumers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GroupMessageEvent {
+    /// Target group identifier.
+    pub group_id: i64,
+    /// Sender QQ identifier.
+    pub sender_id: i64,
+    /// Message identifier from OneBot event.
+    pub message_id: i64,
+    /// Sender display name.
+    pub sender_name: String,
+    /// Bot QQ identifier.
+    pub self_id: i64,
+    /// Plain-text projection of the message.
+    pub text: String,
+    /// Mentioned QQ identifiers extracted from message segments.
+    pub mentions: Vec<i64>,
+    /// Whether the message explicitly mentioned the bot account.
+    pub mentions_self: bool,
+    /// Raw JSON payload for debugging.
+    pub raw: Value,
+}
+
+/// Normalized event variants exposed by the Rust bridge.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum NormalizedEvent {
+    /// Incoming private message.
+    PrivateMessageReceived(PrivateMessageEvent),
+    /// Incoming group message.
+    GroupMessageReceived(GroupMessageEvent),
+}
+
+impl TryFrom<Value> for NormalizedEvent {
+    type Error = NormalizeEventError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        let Some(post_type) = value.get("post_type").and_then(Value::as_str) else {
+            return Err(NormalizeEventError::Unsupported);
+        };
+        if post_type != "message" {
+            return Err(NormalizeEventError::Unsupported);
+        }
+
+        let Some(message_type) = value.get("message_type").and_then(Value::as_str) else {
+            return Err(NormalizeEventError::Unsupported);
+        };
+        let sender_id = extract_i64(&value, "user_id")?;
+        let self_id = extract_i64(&value, "self_id")?;
+        let message_id = extract_i64(&value, "message_id")?;
+        let mentions = extract_mentions(&value);
+        let mentions_self = mentions.contains(&self_id);
+        let text = extract_text(&value);
+        let sender_name = extract_sender_name(&value);
+
+        match message_type {
+            "private" => Ok(Self::PrivateMessageReceived(PrivateMessageEvent {
+                sender_id,
+                message_id,
+                sender_name,
+                self_id,
+                text,
+                mentions,
+                mentions_self,
+                raw: value,
+            })),
+            "group" => Ok(Self::GroupMessageReceived(GroupMessageEvent {
+                group_id: extract_i64(&value, "group_id")?,
+                sender_id,
+                message_id,
+                sender_name,
+                self_id,
+                text,
+                mentions,
+                mentions_self,
+                raw: value,
+            })),
+            _ => Err(NormalizeEventError::Unsupported),
+        }
+    }
+}
+
+fn extract_i64(value: &Value, key: &str) -> Result<i64, NormalizeEventError> {
+    match value.get(key) {
+        Some(Value::Number(number)) => number.as_i64().ok_or(NormalizeEventError::Unsupported),
+        Some(Value::String(text)) => text
+            .parse::<i64>()
+            .map_err(|_| NormalizeEventError::Unsupported),
+        _ => Err(NormalizeEventError::Unsupported),
+    }
+}
+
+fn extract_mentions(value: &Value) -> Vec<i64> {
+    let mut mentions = Vec::new();
+    let Some(segments) = value.get("message").and_then(Value::as_array) else {
+        return mentions;
+    };
+
+    for segment in segments {
+        let is_at = segment.get("type").and_then(Value::as_str) == Some("at");
+        if !is_at {
+            continue;
+        }
+        let Some(raw_qq) = segment
+            .get("data")
+            .and_then(|data| data.get("qq"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if let Ok(qq) = raw_qq.parse::<i64>() {
+            mentions.push(qq);
+        }
+    }
+
+    mentions
+}
+
+fn extract_sender_name(value: &Value) -> String {
+    let sender = value.get("sender").or_else(|| value.get("sender_id"));
+    if let Some(sender) = sender.and_then(Value::as_object) {
+        for key in ["nickname", "card", "user_name", "name"] {
+            let Some(text) = sender.get(key).and_then(Value::as_str) else {
+                continue;
+            };
+            let normalized = text.trim();
+            if !normalized.is_empty() {
+                return normalized.to_string();
+            }
+        }
+    }
+    if let Some(text) = value.get("sender_name").and_then(Value::as_str) {
+        let normalized = text.trim();
+        if !normalized.is_empty() {
+            return normalized.to_string();
+        }
+    }
+
+    "unknown".to_string()
+}
+
+fn extract_text(value: &Value) -> String {
+    if let Some(text) = value
+        .get("message")
+        .and_then(Value::as_array)
+        .map(|segments| {
+            segments
+                .iter()
+                .filter_map(|segment| {
+                    if segment.get("type").and_then(Value::as_str) != Some("text") {
+                        return None;
+                    }
+                    segment
+                        .get("data")
+                        .and_then(|data| data.get("text"))
+                        .and_then(Value::as_str)
+                })
+                .collect::<String>()
+        })
+    {
+        return text.trim().to_string();
+    }
+
+    let Some(raw_message) = value.get("raw_message").and_then(Value::as_str) else {
+        return String::new();
+    };
+    raw_message.trim().to_string()
+}

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["qqbot-core", "qqbot-cli"]
+members = ["crates/codex-bridge-core", "crates/codex-bridge-cli"]
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -1,6 +1,6 @@
-# My QQ Bot
+# Codex Bridge
 
-`my_qq_bot` is a Linux-only Rust bridge around desktop QQ.
+`codex-bridge` is a Linux-only Rust bridge around desktop QQ.
 
 It does three things:
 
@@ -34,14 +34,14 @@ missing, the launcher installs Linux QQ automatically.
 ## Quick Start
 
 ```bash
-cd my_qq_bot
-cargo run -p qqbot-cli -- run
+cd codex-bridge
+cargo run -p codex-bridge -- run
 ```
 
 What happens:
 
 1. the current repository builds the required NapCat shell assets,
-2. `my_qq_bot/.run/default` is prepared,
+2. `codex-bridge/.run/default` is prepared,
 3. QQ is patched to load the local shell build,
 4. QQ starts in the foreground,
 5. the terminal prints QQ/NapCat logs and the text QR code,
@@ -82,7 +82,7 @@ curl http://127.0.0.1:36111/api/friends
 ```bash
 curl -X POST http://127.0.0.1:36111/api/messages/private \
   -H 'content-type: application/json' \
-  -d '{"user_id":2394626220,"text":"hello from my_qq_bot"}'
+  -d '{"user_id":2394626220,"text":"hello from codex-bridge"}'
 ```
 
 ### Subscribe to Incoming Events
@@ -107,26 +107,26 @@ Events are normalized JSON objects. Group and private messages include:
 Start the bridge:
 
 ```bash
-cargo run -p qqbot-cli -- run
+cargo run -p codex-bridge -- run
 ```
 
 Send a private message through the running bridge:
 
 ```bash
-cargo run -p qqbot-cli -- send-private --user-id 2394626220 --text "hello"
+cargo run -p codex-bridge -- send-private --user-id 2394626220 --text "hello"
 ```
 
 Send a group message through the running bridge:
 
 ```bash
-cargo run -p qqbot-cli -- send-group --group-id 123456 --text "hello group"
+cargo run -p codex-bridge -- send-group --group-id 123456 --text "hello group"
 ```
 
 Query cached contacts:
 
 ```bash
-cargo run -p qqbot-cli -- friends
-cargo run -p qqbot-cli -- groups
+cargo run -p codex-bridge -- friends
+cargo run -p codex-bridge -- groups
 ```
 
 ## Developer Commands

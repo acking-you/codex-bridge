@@ -429,6 +429,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-bridge-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "codex-bridge-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "codex-bridge-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "codex-app-server-protocol",
+ "codex-utils-absolute-path",
+ "futures-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "codex-execpolicy"
 version = "0.0.0"
 dependencies = [
@@ -2103,45 +2142,6 @@ name = "pxfm"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5a041e753da8b807c9255f28de81879c78c876392ff2469cde94799b2896b9d"
-
-[[package]]
-name = "qqbot-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "qqbot-core",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "qqbot-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "codex-app-server-protocol",
- "codex-utils-absolute-path",
- "futures-util",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tower",
- "tracing",
- "url",
- "uuid",
-]
 
 [[package]]
 name = "quick-error"
