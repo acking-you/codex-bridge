@@ -1,7 +1,7 @@
 //! Thin stdio runtime wrapper for `codex app-server`.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -17,7 +17,7 @@ use codex_app_server_protocol::{
     FileChangeRequestApprovalParams, FileChangeRequestApprovalResponse, InitializeCapabilities,
     InitializeParams, InitializeResponse, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
     JSONRPCResponse, ReadOnlyAccess, RequestId, SandboxMode, SandboxPolicy, ServerNotification,
-    ServerRequest, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ServerRequest, ThreadItem, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
     ThreadStartResponse, Turn, TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnStatus,
     UserInput,
 };
@@ -146,6 +146,17 @@ pub struct ActiveTurn {
     pub turn_id: String,
 }
 
+/// Sink used to publish recent human-readable turn progress while a task is
+/// still running.
+#[async_trait]
+pub trait TurnProgressSink: Send + Sync {
+    /// Replace the current recent-output view for the active task.
+    async fn update_recent_output(&self, recent_output: Vec<String>) -> Result<()>;
+
+    /// Persist one completed output entry for later task-status queries.
+    async fn commit_output(&self, text: String) -> Result<()>;
+}
+
 /// Minimal interface for codex execution runtimes.
 #[async_trait]
 pub trait CodexExecutor: Send + Sync {
@@ -162,6 +173,17 @@ pub trait CodexExecutor: Send + Sync {
     /// Wait until an active turn reaches a terminal state.
     async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult>;
 
+    /// Wait until an active turn reaches a terminal state while streaming
+    /// recent human-readable progress into the provided sink.
+    async fn wait_for_turn_with_progress(
+        &self,
+        active_turn: &ActiveTurn,
+        progress: Option<&dyn TurnProgressSink>,
+    ) -> Result<CodexTurnResult> {
+        let _ = progress;
+        self.wait_for_turn(active_turn).await
+    }
+
     /// Run a turn and return a summary result.
     async fn run_turn(&self, thread_id: &str, input_text: &str) -> Result<CodexTurnResult> {
         let active_turn = self.start_turn(thread_id, input_text).await?;
@@ -170,6 +192,126 @@ pub trait CodexExecutor: Send + Sync {
 
     /// Interrupt a running turn when supported.
     async fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<()>;
+}
+
+const RECENT_OUTPUT_LIMIT: usize = 4;
+const RECENT_OUTPUT_MAX_CHARS: usize = 400;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveOutputKind {
+    AgentMessage,
+    Plan,
+    CommandExecution,
+    FileChange,
+}
+
+#[derive(Debug, Clone)]
+struct LiveOutputEntry {
+    kind: LiveOutputKind,
+    text: String,
+    order: u64,
+}
+
+#[derive(Debug, Default)]
+struct RecentOutputTracker {
+    active: HashMap<String, LiveOutputEntry>,
+    committed: VecDeque<LiveOutputEntry>,
+    last_recent_output: Vec<String>,
+    next_order: u64,
+}
+
+impl RecentOutputTracker {
+    fn push_delta(&mut self, item_id: &str, kind: LiveOutputKind, delta: &str) -> Option<Vec<String>> {
+        if delta.is_empty() {
+            return None;
+        }
+
+        let order = self.bump_order();
+        let entry = self.active.entry(item_id.to_string()).or_insert_with(|| LiveOutputEntry {
+            kind,
+            text: String::new(),
+            order,
+        });
+        if entry.kind != kind {
+            entry.kind = kind;
+            entry.text.clear();
+        }
+        entry.text.push_str(delta);
+        entry.order = order;
+        self.recent_output_if_changed()
+    }
+
+    fn commit_item(&mut self, item: &ThreadItem) -> (Option<Vec<String>>, Option<String>) {
+        let (item_id, kind, explicit_text) = match item {
+            ThreadItem::AgentMessage {
+                id,
+                text,
+                ..
+            } => (id.as_str(), LiveOutputKind::AgentMessage, Some(text.clone())),
+            ThreadItem::Plan {
+                id,
+                text,
+            } => (id.as_str(), LiveOutputKind::Plan, Some(text.clone())),
+            ThreadItem::CommandExecution {
+                id, ..
+            } => (id.as_str(), LiveOutputKind::CommandExecution, None),
+            ThreadItem::FileChange {
+                id, ..
+            } => (id.as_str(), LiveOutputKind::FileChange, None),
+            _ => return (None, None),
+        };
+
+        let active = self.active.remove(item_id);
+        let text = explicit_text.or_else(|| active.as_ref().map(|entry| entry.text.clone()));
+        let Some(text) = text.and_then(|text| normalize_output_text(&text)) else {
+            return (self.recent_output_if_changed(), None);
+        };
+
+        let kind = active.map(|entry| entry.kind).unwrap_or(kind);
+        let order = self.bump_order();
+        self.committed.push_back(LiveOutputEntry {
+            kind,
+            text: text.clone(),
+            order,
+        });
+        while self.committed.len() > RECENT_OUTPUT_LIMIT {
+            let _ = self.committed.pop_front();
+        }
+
+        (self.recent_output_if_changed(), Some(render_output_entry(kind, &text)))
+    }
+
+    fn recent_output_if_changed(&mut self) -> Option<Vec<String>> {
+        let recent_output = self.render_recent_output();
+        if recent_output == self.last_recent_output {
+            return None;
+        }
+        self.last_recent_output = recent_output.clone();
+        Some(recent_output)
+    }
+
+    fn render_recent_output(&self) -> Vec<String> {
+        let mut entries = self
+            .committed
+            .iter()
+            .cloned()
+            .chain(self.active.values().cloned())
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.order);
+        let start = entries.len().saturating_sub(RECENT_OUTPUT_LIMIT);
+        entries[start..]
+            .iter()
+            .filter_map(|entry| {
+                normalize_output_text(&entry.text)
+                    .map(|text| render_output_entry(entry.kind, &text))
+            })
+            .collect()
+    }
+
+    fn bump_order(&mut self) -> u64 {
+        self.next_order = self.next_order.saturating_add(1);
+        self.next_order
+    }
 }
 
 /// Concrete runtime implementation backed by a child `codex-app-server`
@@ -324,8 +466,10 @@ impl CodexRuntime {
         state: &mut RuntimeReadState,
         thread_id: &str,
         turn_id: &str,
+        progress: Option<&dyn TurnProgressSink>,
     ) -> Result<TurnCompletion> {
         let mut items = Vec::new();
+        let mut tracker = progress.map(|_| RecentOutputTracker::default());
         loop {
             let message = if let Some(notification) = state.pending_notifications.pop_front() {
                 JSONRPCMessage::Notification(notification)
@@ -342,7 +486,61 @@ impl CodexRuntime {
                     log_server_notification(&notification);
 
                     match notification {
+                        ServerNotification::AgentMessageDelta(payload) => {
+                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                                if let Some(recent_output) = tracker.push_delta(
+                                    &payload.item_id,
+                                    LiveOutputKind::AgentMessage,
+                                    &payload.delta,
+                                ) {
+                                    progress.update_recent_output(recent_output).await?;
+                                }
+                            }
+                        },
+                        ServerNotification::PlanDelta(payload) => {
+                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                                if let Some(recent_output) = tracker.push_delta(
+                                    &payload.item_id,
+                                    LiveOutputKind::Plan,
+                                    &payload.delta,
+                                ) {
+                                    progress.update_recent_output(recent_output).await?;
+                                }
+                            }
+                        },
+                        ServerNotification::CommandExecutionOutputDelta(payload) => {
+                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                                if let Some(recent_output) = tracker.push_delta(
+                                    &payload.item_id,
+                                    LiveOutputKind::CommandExecution,
+                                    &payload.delta,
+                                ) {
+                                    progress.update_recent_output(recent_output).await?;
+                                }
+                            }
+                        },
+                        ServerNotification::FileChangeOutputDelta(payload) => {
+                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                                if let Some(recent_output) = tracker.push_delta(
+                                    &payload.item_id,
+                                    LiveOutputKind::FileChange,
+                                    &payload.delta,
+                                ) {
+                                    progress.update_recent_output(recent_output).await?;
+                                }
+                            }
+                        },
                         ServerNotification::ItemCompleted(payload) => {
+                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                                let (recent_output, committed_output) =
+                                    tracker.commit_item(&payload.item);
+                                if let Some(recent_output) = recent_output {
+                                    progress.update_recent_output(recent_output).await?;
+                                }
+                                if let Some(committed_output) = committed_output {
+                                    progress.commit_output(committed_output).await?;
+                                }
+                            }
                             items.push(
                                 serde_json::to_value(payload.item)
                                     .context("serialize completed item")?,
@@ -468,6 +666,14 @@ impl CodexExecutor for CodexRuntime {
     }
 
     async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult> {
+        self.wait_for_turn_with_progress(active_turn, None).await
+    }
+
+    async fn wait_for_turn_with_progress(
+        &self,
+        active_turn: &ActiveTurn,
+        progress: Option<&dyn TurnProgressSink>,
+    ) -> Result<CodexTurnResult> {
         info!(
             thread_id = %active_turn.thread_id,
             turn_id = %active_turn.turn_id,
@@ -475,7 +681,12 @@ impl CodexExecutor for CodexRuntime {
         );
         let mut state = self.read_state.lock().await;
         let completion = self
-            .wait_for_turn_completion(&mut state, &active_turn.thread_id, &active_turn.turn_id)
+            .wait_for_turn_completion(
+                &mut state,
+                &active_turn.thread_id,
+                &active_turn.turn_id,
+                progress,
+            )
             .await?;
         let final_reply = summarize_turn_result(&completion.turn, &completion.items);
         let error_message = completion
@@ -679,6 +890,31 @@ fn turn_status_label(status: &TurnStatus) -> &'static str {
         TurnStatus::Failed => "failed",
         TurnStatus::Interrupted => "interrupted",
     }
+}
+
+fn normalize_output_text(text: &str) -> Option<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let truncated = trimmed.chars().take(RECENT_OUTPUT_MAX_CHARS).collect::<String>();
+    if trimmed.chars().count() > RECENT_OUTPUT_MAX_CHARS {
+        Some(format!("{truncated}..."))
+    } else {
+        Some(truncated)
+    }
+}
+
+fn render_output_entry(kind: LiveOutputKind, text: &str) -> String {
+    let label = match kind {
+        LiveOutputKind::AgentMessage => "进度",
+        LiveOutputKind::Plan => "计划",
+        LiveOutputKind::CommandExecution => "命令输出",
+        LiveOutputKind::FileChange => "改动输出",
+    };
+    format!("{label}：\n{text}")
 }
 
 /// Build the `cargo run` command used to launch the local `codex-app-server`.

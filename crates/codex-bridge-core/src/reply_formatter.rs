@@ -59,17 +59,28 @@ pub fn format_approval_expired() -> String {
 /// Render the admin-facing approval notice for one pending task.
 pub fn format_admin_approval_notice(pending: &PendingApproval) -> String {
     format!(
-        "待审批任务：{}\n来源：{}\n发起人：{} ({})\n消息：{}\n命令：/approve {} /deny {} /status \
-         {}",
+        "待审批任务：{}\n来源：{}\n发起人：{} ({})\n消息：{}\n下面三条命令会分开发，直接复制其中一条就行。",
         pending.task_id,
         if pending.task.is_group { "群聊" } else { "私聊" },
         pending.task.source_sender_name,
         pending.task.source_sender_id,
         pending.task.source_text,
-        pending.task_id,
-        pending.task_id,
-        pending.task_id,
     )
+}
+
+/// Render the admin command used to approve a waiting task.
+pub fn format_admin_approve_command(task_id: &str) -> String {
+    format!("/approve {task_id}")
+}
+
+/// Render the admin command used to deny a waiting task.
+pub fn format_admin_deny_command(task_id: &str) -> String {
+    format!("/deny {task_id}")
+}
+
+/// Render the admin command used to inspect a task.
+pub fn format_admin_status_command(task_id: &str) -> String {
+    format!("/status {task_id}")
 }
 
 /// Render the admin-facing result after approving a task.
@@ -88,15 +99,19 @@ pub fn format_admin_task_not_found(task_id: &str) -> String {
 }
 
 /// Render the admin-facing status view for a persisted task.
-pub fn format_task_status(task: &TaskRecord) -> String {
-    format!(
+pub fn format_task_status(task: &TaskRecord, recent_output: &[String]) -> String {
+    let header = format!(
         "任务：{}\n状态：{:?}\n会话：{}\n发起人：{}\n源消息：{}",
         task.task_id,
         task.status,
         task.conversation_key,
         task.owner_sender_id,
         task.source_message_id
-    )
+    );
+    match format_recent_output_section(recent_output) {
+        Some(section) => format!("{header}\n{section}"),
+        None => header,
+    }
 }
 
 /// Return the private gate message for non-friends.
@@ -131,6 +146,7 @@ pub fn format_status(
     running: Option<&TaskSummary>,
     queue_len: usize,
     last: Option<&TaskSummary>,
+    recent_output: &[String],
 ) -> String {
     let running_line = match running {
         Some(task) => format!("当前任务：{} ({})", task.task_id, task.conversation_key),
@@ -145,5 +161,23 @@ pub fn format_status(
         ),
         None => "最近结果：无".to_string(),
     };
-    [running_line, queue_line, last_line].join("\n")
+    let mut sections = vec![running_line, queue_line, last_line];
+    if let Some(section) = format_recent_output_section(recent_output) {
+        sections.push(section);
+    }
+    sections.join("\n")
+}
+
+fn format_recent_output_section(recent_output: &[String]) -> Option<String> {
+    if recent_output.is_empty() {
+        return None;
+    }
+
+    let entries = recent_output
+        .iter()
+        .enumerate()
+        .map(|(index, text)| format!("{}. {}", index + 1, text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("最近输出：\n{entries}"))
 }

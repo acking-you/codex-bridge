@@ -79,6 +79,7 @@ async fn status_route_returns_running_snapshot_and_prompt_file() {
             running_task_id: Some("task-1".to_string()),
             running_conversation_key: Some("private:42".to_string()),
             running_summary: Some("正在执行".to_string()),
+            recent_output: vec!["先看 orchestrator".to_string(), "准备改 /status".to_string()],
             queue_len: 2,
             last_terminal_summary: Some("已完成".to_string()),
             last_retryable_conversation_key: None,
@@ -101,6 +102,9 @@ async fn status_route_returns_running_snapshot_and_prompt_file() {
         .await
         .expect("read body");
     let body = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(body.contains("最近输出"));
+    assert!(body.contains("先看 orchestrator"));
+    assert!(body.contains("准备改 /status"));
     assert!(body.contains("Prompt file: .run/default/prompt/system_prompt.md"));
     assert!(!body.contains("Prompt version"));
 }

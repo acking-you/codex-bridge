@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     admin_approval::{PendingApproval, PendingApprovalError, PendingApprovalPool},
-    codex_runtime::{ActiveTurn, CodexExecutor, CodexTurnResult},
+    codex_runtime::{ActiveTurn, CodexExecutor, CodexTurnResult, TurnProgressSink},
     message_router::{CommandRequest, ControlCommand, MessageRouter, RouteDecision, TaskRequest},
     reply_context::ActiveReplyContext,
     reply_formatter,
@@ -142,6 +142,7 @@ async fn handle_command(
             scheduler.running(),
             scheduler.queue_len(),
             scheduler.last_terminal(),
+            &[],
         ),
         ControlCommand::Queue => scheduler.queue_preview(),
         ControlCommand::Cancel => {
@@ -372,6 +373,7 @@ struct RuntimeTaskDeps<'a> {
 }
 
 struct RuntimeCommandDeps<'a> {
+    state: &'a ServiceState,
     replies: &'a dyn ReplySink,
     scheduler: &'a mut Scheduler,
     pending_tasks: &'a mut VecDeque<ScheduledRuntimeTask>,
@@ -383,13 +385,50 @@ struct RuntimeCommandDeps<'a> {
     config: &'a OrchestratorConfig,
 }
 
+struct RuntimeProgressSink {
+    state: ServiceState,
+    state_store: Arc<Mutex<StateStore>>,
+    task_id: String,
+}
+
+#[async_trait]
+impl TurnProgressSink for RuntimeProgressSink {
+    async fn update_recent_output(&self, recent_output: Vec<String>) -> Result<()> {
+        let task_id = self.task_id.clone();
+        self.state
+            .update_task_snapshot(move |snapshot| {
+                let matches_running_task = snapshot.running_task_id.is_none()
+                    || snapshot.running_task_id.as_deref() == Some(task_id.as_str());
+                if matches_running_task {
+                    snapshot.recent_output = recent_output;
+                }
+            })
+            .await;
+        Ok(())
+    }
+
+    async fn commit_output(&self, text: String) -> Result<()> {
+        let store = self.state_store.lock().await;
+        store.append_task_output(&self.task_id, &text, 4)
+    }
+}
+
 async fn execute_task_for_runtime(
     codex: Arc<dyn CodexExecutor>,
+    state: ServiceState,
     state_store: Arc<Mutex<StateStore>>,
     task_id: String,
     active_turn: ActiveTurn,
 ) -> Result<TaskExecutionOutcome> {
-    let result = match codex.wait_for_turn(&active_turn).await {
+    let progress = RuntimeProgressSink {
+        state,
+        state_store: state_store.clone(),
+        task_id: task_id.clone(),
+    };
+    let result = match codex
+        .wait_for_turn_with_progress(&active_turn, Some(&progress))
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
             let store = state_store.lock().await;
@@ -503,6 +542,7 @@ async fn start_runtime_task(
         .await?;
     let handle = tokio::spawn(execute_task_for_runtime(
         codex,
+        state.clone(),
         state_store,
         persisted_task_id,
         active_turn.clone(),
@@ -653,6 +693,24 @@ async fn register_pending_approval(
     .await?;
     replies
         .send_private(admin_user_id, reply_formatter::format_admin_approval_notice(&pending))
+        .await?;
+    replies
+        .send_private(
+            admin_user_id,
+            reply_formatter::format_admin_approve_command(&pending.task_id),
+        )
+        .await?;
+    replies
+        .send_private(
+            admin_user_id,
+            reply_formatter::format_admin_deny_command(&pending.task_id),
+        )
+        .await?;
+    replies
+        .send_private(
+            admin_user_id,
+            reply_formatter::format_admin_status_command(&pending.task_id),
+        )
         .await
 }
 
@@ -661,6 +719,7 @@ async fn handle_runtime_command(
     deps: RuntimeCommandDeps<'_>,
 ) -> Result<Option<ScheduledRuntimeTask>> {
     let RuntimeCommandDeps {
+        state,
         replies,
         scheduler,
         pending_tasks,
@@ -706,14 +765,22 @@ async fn handle_runtime_command(
                 sender_id = command.source_sender_id,
                 "received status command"
             );
+            let running_snapshot = state.task_snapshot().await;
             let text = if let Some(task_id) = task_id {
                 if let Some(pending) = pending_approvals.get(&task_id) {
                     reply_formatter::format_admin_approval_notice(pending)
                 } else {
                     let store = state_store.lock().await;
+                    let recent_output = if running_snapshot.running_task_id.as_deref()
+                        == Some(task_id.as_str())
+                    {
+                        running_snapshot.recent_output.clone()
+                    } else {
+                        store.recent_task_output(&task_id, 4)?
+                    };
                     store
                         .task_by_id(&task_id)?
-                        .map(|task| reply_formatter::format_task_status(&task))
+                        .map(|task| reply_formatter::format_task_status(&task, &recent_output))
                         .unwrap_or_else(|| reply_formatter::format_admin_task_not_found(&task_id))
                 }
             } else {
@@ -721,6 +788,7 @@ async fn handle_runtime_command(
                     scheduler.running(),
                     scheduler.queue_len(),
                     scheduler.last_terminal(),
+                    &running_snapshot.recent_output,
                 )
             };
             send_reply(replies, command.is_group, command.reply_target_id, text).await?;
@@ -1041,6 +1109,7 @@ pub async fn run(
                                     if let Some(task) = handle_runtime_command(
                                         command_request,
                                         RuntimeCommandDeps {
+                                            state: &state,
                                             replies: &replies,
                                             scheduler: &mut scheduler,
                                             pending_tasks: &mut pending_tasks,
@@ -1140,6 +1209,7 @@ pub async fn run(
                 if let Some(task) = handle_runtime_command(
                     command_request,
                     RuntimeCommandDeps {
+                        state: &state,
                         replies: &replies,
                         scheduler: &mut scheduler,
                         pending_tasks: &mut pending_tasks,
@@ -1214,17 +1284,25 @@ async fn refresh_snapshot(
     prompt_file: &std::path::Path,
     last_retryable_conversation_key: Option<&str>,
 ) -> Result<()> {
+    let previous = state.task_snapshot().await;
     let running = scheduler.running().cloned();
+    let running_task_id = running.as_ref().map(|task| task.task_id.clone());
     let running_conversation_key = running.as_ref().map(|task| task.conversation_key.clone());
+    let recent_output = match (running_task_id.as_deref(), previous.running_task_id.as_deref()) {
+        (Some(current), Some(previous_task)) if current == previous_task => previous.recent_output,
+        (None, _) => Vec::new(),
+        _ => Vec::new(),
+    };
 
     let running = scheduler.running();
     let last_terminal_summary = scheduler
         .last_terminal()
         .and_then(|task| task.summary.clone());
     let snapshot = crate::service::TaskSnapshot {
-        running_task_id: running.map(|task| task.task_id.clone()),
+        running_task_id,
         running_conversation_key,
         running_summary: running.and_then(|task| task.summary.clone()),
+        recent_output,
         queue_len: scheduler.queue_len(),
         last_terminal_summary,
         last_retryable_conversation_key: last_retryable_conversation_key.map(str::to_string),

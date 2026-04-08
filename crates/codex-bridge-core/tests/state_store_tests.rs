@@ -149,6 +149,34 @@ fn pending_approval_task_round_trips_and_can_expire() {
 }
 
 #[test]
+fn recent_task_output_keeps_only_latest_entries() {
+    let store = StateStore::open_in_memory().expect("open in-memory store");
+    let binding = ConversationBinding {
+        conversation_key: "conv-output".to_string(),
+        thread_id: "thr-output".to_string(),
+    };
+    let task_id = store
+        .insert_task_with_source(&binding, TaskStatus::Running, 42, 10001)
+        .expect("insert running task");
+
+    for index in 0..6 {
+        store
+            .append_task_output(&task_id, &format!("line-{index}"), 4)
+            .expect("append output");
+    }
+
+    let recent = store
+        .recent_task_output(&task_id, 4)
+        .expect("query recent output");
+    assert_eq!(recent, vec![
+        "line-2".to_string(),
+        "line-3".to_string(),
+        "line-4".to_string(),
+        "line-5".to_string(),
+    ]);
+}
+
+#[test]
 fn schema_v4_drops_prompt_version_columns_from_runtime_tables() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("state.sqlite3");
@@ -169,6 +197,9 @@ fn schema_v4_drops_prompt_version_columns_from_runtime_tables() {
         "status",
         "created_at",
     ]);
+
+    let output_columns = table_columns(&conn, "task_output");
+    assert_eq!(output_columns, vec!["row_id", "task_id", "text", "created_at"]);
 }
 
 #[test]
@@ -251,7 +282,7 @@ fn state_store_open_fails_on_newer_schema() {
     let path = tempdir.path().join("state.sqlite3");
 
     let conn = Connection::open(&path).expect("open sqlite db");
-    conn.execute_batch("PRAGMA user_version = 5;")
+    conn.execute_batch("PRAGMA user_version = 6;")
         .expect("set newer schema version");
 
     let reopened = StateStore::open(&path);

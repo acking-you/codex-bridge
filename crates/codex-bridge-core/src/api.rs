@@ -120,13 +120,18 @@ async fn status_handler(
         .last_terminal_summary
         .clone()
         .unwrap_or_else(|| "无".to_string());
+    let recent_output = if snapshot.recent_output.is_empty() {
+        "最近输出：无".to_string()
+    } else {
+        format!("最近输出：\n{}", snapshot.recent_output.join("\n"))
+    };
     let prompt_file = snapshot
         .prompt_file
         .clone()
         .unwrap_or_else(|| "无".to_string());
     let text = format!(
         "当前任务：{running}\n会话：{running_conversation}\n排队数量：{queue_len}\n最近结果：\
-         {last}\nPrompt file: {prompt_file}"
+         {last}\n{recent_output}\nPrompt file: {prompt_file}"
     );
     Ok(Json(TextResponse {
         status: "ok",

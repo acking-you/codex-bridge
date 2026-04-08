@@ -21,6 +21,7 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 - Use exactly one local `reply_current.py` command per message you want to send.
 - Attachments must already exist under `.run/artifacts/`.
 - Prefer text for short answers, image for visual output, and file for markdown/report artifacts.
+- If you want line breaks in QQ, put real newline characters in `--text`. Do not send the literal characters `\n` as a fake line break.
 
 ## Commands
 Send plain text:

@@ -34,6 +34,7 @@ struct FakeCodexExecutor {
     interrupt_notify: Notify,
     turn_id: String,
     reply_text: String,
+    progress_updates: Vec<String>,
     status: TurnStatus,
     wait_for_interrupt: bool,
 }
@@ -61,6 +62,7 @@ impl FakeCodexExecutor {
             interrupt_notify: Notify::new(),
             turn_id: turn_id.to_string(),
             reply_text: reply_text.to_string(),
+            progress_updates: Vec::new(),
             status,
             wait_for_interrupt: false,
         }
@@ -79,6 +81,26 @@ impl FakeCodexExecutor {
             interrupt_notify: Notify::new(),
             turn_id: turn_id.to_string(),
             reply_text: String::new(),
+            progress_updates: Vec::new(),
+            status: TurnStatus::Interrupted,
+            wait_for_interrupt: true,
+        }
+    }
+
+    fn blocking_with_progress(thread_ids: Vec<&str>, turn_id: &str, progress_updates: Vec<&str>) -> Self {
+        Self {
+            thread_ids: AsyncMutex::new(
+                thread_ids
+                    .into_iter()
+                    .map(|thread_id| thread_id.to_string())
+                    .collect(),
+            ),
+            ensure_thread_calls: AsyncMutex::new(Vec::new()),
+            interrupt_calls: AsyncMutex::new(Vec::new()),
+            interrupt_notify: Notify::new(),
+            turn_id: turn_id.to_string(),
+            reply_text: String::new(),
+            progress_updates: progress_updates.into_iter().map(str::to_string).collect(),
             status: TurnStatus::Interrupted,
             wait_for_interrupt: true,
         }
@@ -132,6 +154,22 @@ impl CodexExecutor for FakeCodexExecutor {
             items: vec![],
             final_reply: Some(self.reply_text.clone()),
         })
+    }
+
+    async fn wait_for_turn_with_progress(
+        &self,
+        active_turn: &ActiveTurn,
+        progress: Option<&dyn codex_bridge_core::codex_runtime::TurnProgressSink>,
+    ) -> Result<CodexTurnResult> {
+        if let Some(progress) = progress {
+            for update in &self.progress_updates {
+                progress
+                    .update_recent_output(vec![update.clone()])
+                    .await?;
+                progress.commit_output(update.clone()).await?;
+            }
+        }
+        self.wait_for_turn(active_turn).await
     }
 
     async fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<()> {
@@ -788,6 +826,16 @@ async fn non_admin_friend_private_message_waits_for_admin_approval() {
         .expect("query pending task")
         .expect("pending task exists");
     assert_eq!(pending.status, TaskStatus::PendingApproval);
+    let messages = sent_messages.lock().expect("messages").clone();
+    assert!(messages
+        .iter()
+        .any(|text| text == &format!("/approve {}", pending.task_id)));
+    assert!(messages
+        .iter()
+        .any(|text| text == &format!("/deny {}", pending.task_id)));
+    assert!(messages
+        .iter()
+        .any(|text| text == &format!("/status {}", pending.task_id)));
 
     state
         .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
@@ -820,6 +868,88 @@ async fn non_admin_friend_private_message_waits_for_admin_approval() {
         .expect("query completed task")
         .expect("completed task exists");
     assert_eq!(completed.status, TaskStatus::Completed);
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn admin_status_shows_recent_live_output_for_running_task() {
+    let codex = Arc::new(FakeCodexExecutor::blocking_with_progress(
+        vec!["thread-live"],
+        "turn-live",
+        vec!["先定位 reply formatter", "现在补 status 输出"],
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_group_event_from(
+        2_394_626_220,
+        "admin",
+        900,
+        7001,
+        "执行一个会慢一点的任务",
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state.task_snapshot().await;
+            if snapshot
+                .recent_output
+                .iter()
+                .any(|line| line.contains("现在补 status 输出"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recent output should appear in snapshot");
+
+    state
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Status {
+            task_id: None,
+        }))
+        .await
+        .expect("request status");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("最近输出") && text.contains("现在补 status 输出"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("status output should include live task text");
+
+    state
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Cancel))
+        .await
+        .expect("cancel running task");
 
     run_handle.abort();
     bridge_handle.abort();

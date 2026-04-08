@@ -53,6 +53,8 @@ pub struct TaskSnapshot {
     pub running_conversation_key: Option<String>,
     /// Summary of the running task if it has completed.
     pub running_summary: Option<String>,
+    /// Recent live text output for the currently running task.
+    pub recent_output: Vec<String>,
     /// Current number of tasks waiting in queue.
     pub queue_len: usize,
     /// Summary from the most recent terminal task.
@@ -289,6 +291,15 @@ impl ServiceState {
     /// Replace the current task snapshot.
     pub async fn set_task_snapshot(&self, snapshot: TaskSnapshot) {
         *self.inner.task_snapshot.write().await = snapshot;
+    }
+
+    /// Mutate the current task snapshot in place.
+    pub async fn update_task_snapshot<F>(&self, update: F)
+    where
+        F: FnOnce(&mut TaskSnapshot),
+    {
+        let mut snapshot = self.inner.task_snapshot.write().await;
+        update(&mut snapshot);
     }
 
     /// Read the current task snapshot.

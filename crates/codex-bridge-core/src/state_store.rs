@@ -11,7 +11,7 @@ use rusqlite::{params, types::Type, Connection, Error, OptionalExtension};
 use uuid::Uuid;
 
 /// State schema migration level.
-const CURRENT_SCHEMA_VERSION: i32 = 4;
+const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 /// Task lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,6 +359,60 @@ impl StateStore {
         Ok(updated)
     }
 
+    /// Append one recent text output entry for a task and prune older entries.
+    pub fn append_task_output(&self, task_id: &str, text: &str, max_entries: usize) -> Result<()> {
+        let normalized = text.trim();
+        if normalized.is_empty() {
+            return Ok(());
+        }
+
+        self.conn
+            .execute(
+                "INSERT INTO task_output (task_id, text, created_at)
+                 VALUES (?1, ?2, strftime('%s', 'now'))",
+                params![task_id, normalized],
+            )
+            .context("insert task output")?;
+
+        if max_entries > 0 {
+            self.conn
+                .execute(
+                    "DELETE FROM task_output
+                      WHERE task_id = ?1
+                        AND row_id NOT IN (
+                            SELECT row_id
+                              FROM task_output
+                             WHERE task_id = ?1
+                             ORDER BY row_id DESC
+                             LIMIT ?2
+                        )",
+                    params![task_id, max_entries as i64],
+                )
+                .context("prune old task output")?;
+        }
+
+        Ok(())
+    }
+
+    /// Return recent task output entries in chronological order.
+    pub fn recent_task_output(&self, task_id: &str, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT text
+               FROM task_output
+              WHERE task_id = ?1
+              ORDER BY row_id DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], |row| row.get::<_, String>(0))
+            .context("query recent task output")?;
+        let mut output = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("decode recent task output rows")?;
+        output.reverse();
+        Ok(output)
+    }
+
     fn migrate_and_seed(&mut self) -> Result<()> {
         let current_version: i32 = self
             .conn
@@ -391,6 +445,7 @@ impl StateStore {
                     1 => migrate_v1_to_v2(&tx).context("migrate sqlite schema from v1 to v2")?,
                     2 => migrate_v2_to_v3(&tx).context("migrate sqlite schema from v2 to v3")?,
                     3 => migrate_v3_to_v4(&tx).context("migrate sqlite schema from v3 to v4")?,
+                    4 => migrate_v4_to_v5(&tx).context("migrate sqlite schema from v4 to v5")?,
                     other => anyhow::bail!("unsupported sqlite schema version {other}"),
                 }
                 version += 1;
@@ -423,8 +478,16 @@ fn run_initial_migration(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE task_output (
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
         CREATE INDEX IF NOT EXISTS task_runs_by_conversation_created
-            ON task_runs (conversation_key, created_at)",
+            ON task_runs (conversation_key, created_at);
+        CREATE INDEX IF NOT EXISTS task_output_by_task_row
+            ON task_output (task_id, row_id)",
     )
     .context("apply v2 schema")
 }
@@ -506,4 +569,18 @@ fn migrate_v3_to_v4(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             ON task_runs (conversation_key, created_at);",
     )
     .context("drop prompt-version columns from runtime tables")
+}
+
+fn migrate_v4_to_v5(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE task_output (
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE INDEX task_output_by_task_row
+            ON task_output (task_id, row_id);",
+    )
+    .context("add task output history table")
 }

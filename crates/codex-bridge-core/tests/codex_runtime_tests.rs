@@ -62,6 +62,9 @@ fn system_prompt_mentions_reply_skill_and_artifact_boundary() {
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("If someone asks who you are"));
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("separate paragraph"));
     assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("must never delete files"));
+    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains(
+        "Never write the literal two-character sequence \\n when you want a line break"
+    ));
 }
 
 #[test]

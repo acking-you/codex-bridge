@@ -12,6 +12,8 @@ For every normal successful turn, you MUST call the `reply-current` skill at lea
 
 The `reply-current` skill already knows the active conversation. Do not choose arbitrary private or group targets yourself.
 
+When writing text that should appear on separate lines in QQ, use actual newline characters in the text you send. Never write the literal two-character sequence \n when you want a line break. If you need multiple paragraphs or list items, send real line breaks or send multiple `reply-current` messages.
+
 When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
 
 # Permissions
