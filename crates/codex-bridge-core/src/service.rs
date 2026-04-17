@@ -317,16 +317,16 @@ impl ServiceState {
         self.inner.events_tx.subscribe()
     }
 
-    /// Activate the reply context for the currently running task.
+    /// Activate a new reply context (concurrent contexts are allowed).
     pub async fn activate_reply_context(&self, context: ActiveReplyContext) -> Result<()> {
         let mut registry = self.inner.reply_registry.lock().await;
         registry.activate(context)
     }
 
-    /// Revoke the reply context once a task finishes.
-    pub async fn deactivate_reply_context(&self) -> Result<()> {
+    /// Revoke a reply context once its task finishes.
+    pub async fn deactivate_reply_context(&self, token: &str) -> Result<()> {
         let mut registry = self.inner.reply_registry.lock().await;
-        registry.deactivate()
+        registry.deactivate(token)
     }
 
     /// Resolve an active reply token into its current context.
@@ -341,10 +341,10 @@ impl ServiceState {
         registry.mark_sent(token)
     }
 
-    /// Read the number of successful skill replies issued for the active task.
-    pub async fn current_reply_sent_count(&self) -> usize {
+    /// Read the number of successful skill replies issued for one token.
+    pub async fn reply_sent_count(&self, token: &str) -> usize {
         let registry = self.inner.reply_registry.lock().await;
-        registry.current_send_count()
+        registry.send_count_for(token)
     }
 
     /// Dispatch a private-message send request to the bridge worker.

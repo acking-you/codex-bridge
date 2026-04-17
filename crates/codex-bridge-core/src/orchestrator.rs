@@ -10,6 +10,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use codex_app_server_protocol::TurnStatus;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -368,7 +369,33 @@ struct TaskExecutionOutcome {
 struct ActiveRuntimeTask {
     task: TaskRequest,
     active_turn: ActiveTurn,
+    /// Reply token issued to this task; the orchestrator uses it to revoke
+    /// the matching reply context once the task finishes.
+    reply_token: String,
+}
+
+/// One in-flight task join future tagged with its conversation key, so the
+/// orchestrator can demux completion events back to the right
+/// `ActiveRuntimeTask` entry.
+type TaggedJoin = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    String,
+                    std::result::Result<Result<TaskExecutionOutcome>, tokio::task::JoinError>,
+                ),
+            > + Send,
+    >,
+>;
+
+fn tag_join(
+    conversation_key: String,
     handle: tokio::task::JoinHandle<Result<TaskExecutionOutcome>>,
+) -> TaggedJoin {
+    Box::pin(async move {
+        let result = handle.await;
+        (conversation_key, result)
+    })
 }
 
 struct RuntimeTaskDeps<'a> {
@@ -383,10 +410,10 @@ struct RuntimeCommandDeps<'a> {
     state: &'a ServiceState,
     replies: &'a dyn ReplySink,
     scheduler: &'a mut Scheduler,
-    pending_tasks: &'a mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &'a mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
     retryable_tasks: &'a mut HashMap<String, TaskRequest>,
     pending_approvals: &'a mut PendingApprovalPool,
-    active_task: Option<&'a ActiveRuntimeTask>,
+    active_tasks: &'a HashMap<String, ActiveRuntimeTask>,
     codex: &'a Arc<dyn CodexExecutor>,
     state_store: &'a Arc<Mutex<StateStore>>,
     config: &'a OrchestratorConfig,
@@ -472,7 +499,7 @@ async fn start_runtime_task(
     scheduler: &mut Scheduler,
     deps: RuntimeTaskDeps<'_>,
     already_promoted: bool,
-) -> Result<ActiveRuntimeTask> {
+) -> Result<(ActiveRuntimeTask, tokio::task::JoinHandle<Result<TaskExecutionOutcome>>)> {
     let RuntimeTaskDeps {
         replies,
         state,
@@ -554,18 +581,21 @@ async fn start_runtime_task(
         persisted_task_id,
         active_turn.clone(),
     ));
-    Ok(ActiveRuntimeTask {
-        task,
-        active_turn,
+    Ok((
+        ActiveRuntimeTask {
+            task,
+            active_turn,
+            reply_token,
+        },
         handle,
-    })
+    ))
 }
 
 async fn enqueue_runtime_task(
     scheduled: ScheduledRuntimeTask,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
 ) -> Result<()> {
     let task = scheduled.task.clone();
     let queue_task_id = scheduled
@@ -585,7 +615,10 @@ async fn enqueue_runtime_task(
                 position,
                 "task enqueued"
             );
-            pending_tasks.push_back(scheduled);
+            pending_tasks
+                .entry(task.conversation_key.clone())
+                .or_default()
+                .push_back(scheduled);
             send_reply(
                 replies,
                 task.is_group,
@@ -742,12 +775,12 @@ async fn approve_pending_task(
     pending: PendingApproval,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
     state_store: &Arc<Mutex<StateStore>>,
-    active_task: Option<&ActiveRuntimeTask>,
+    active_tasks: &HashMap<String, ActiveRuntimeTask>,
 ) -> Result<Option<ScheduledRuntimeTask>> {
     let scheduled = ScheduledRuntimeTask::persisted(pending.task_id.clone(), pending.task.clone());
-    if active_task.is_some() {
+    if active_tasks.contains_key(&pending.task.conversation_key) {
         {
             let store = state_store.lock().await;
             store.update_task_status(&pending.task_id, TaskStatus::Queued)?;
@@ -763,9 +796,9 @@ async fn handle_group_reaction_approval(
     reaction: crate::events::GroupMessageReactionEvent,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
     pending_approvals: &mut PendingApprovalPool,
-    active_task: Option<&ActiveRuntimeTask>,
+    active_tasks: &HashMap<String, ActiveRuntimeTask>,
     state_store: &Arc<Mutex<StateStore>>,
     config: &OrchestratorConfig,
 ) -> Result<Option<ScheduledRuntimeTask>> {
@@ -788,7 +821,7 @@ async fn handle_group_reaction_approval(
         scheduler,
         pending_tasks,
         state_store,
-        active_task,
+        active_tasks,
     )
     .await
 }
@@ -878,7 +911,7 @@ async fn handle_runtime_command(
         pending_tasks,
         retryable_tasks,
         pending_approvals,
-        active_task,
+        active_tasks,
         codex,
         state_store,
         config,
@@ -963,7 +996,7 @@ async fn handle_runtime_command(
                 sender_id = command.source_sender_id,
                 "received cancel command"
             );
-            let reply_text = match active_task {
+            let reply_text = match active_tasks.get(&command.conversation_key) {
                 Some(active) => {
                     if command.source_sender_id != 0
                         && command.source_sender_id != active.task.source_sender_id
@@ -1012,7 +1045,7 @@ async fn handle_runtime_command(
                 return Ok(None);
             };
 
-            if active_task.is_some() {
+            if active_tasks.contains_key(&task.conversation_key) {
                 enqueue_runtime_task(
                     ScheduledRuntimeTask::fresh(task),
                     replies,
@@ -1061,7 +1094,7 @@ async fn handle_runtime_command(
                 scheduler,
                 pending_tasks,
                 state_store,
-                active_task,
+                active_tasks,
             )
             .await? {
                 send_reply(
@@ -1154,10 +1187,7 @@ async fn handle_runtime_command(
                 .await?;
                 return Ok(None);
             };
-            if active_task
-                .map(|task| task.task.conversation_key == command.conversation_key)
-                .unwrap_or(false)
-            {
+            if active_tasks.contains_key(&command.conversation_key) {
                 send_reply(
                     replies,
                     command.is_group,
@@ -1205,11 +1235,12 @@ pub async fn run(
     let mut event_rx = state.subscribe_events();
     let mut router = MessageRouter::new();
     let mut scheduler = Scheduler::new(config.queue_capacity);
-    let mut pending_tasks: VecDeque<ScheduledRuntimeTask> = VecDeque::new();
+    let mut pending_tasks: HashMap<String, VecDeque<ScheduledRuntimeTask>> = HashMap::new();
     let mut pending_approvals = PendingApprovalPool::new(config.pending_approval_capacity);
     let mut retryable_tasks: HashMap<String, TaskRequest> = HashMap::new();
     let mut last_retryable_conversation_key: Option<String> = None;
-    let mut active_task: Option<ActiveRuntimeTask> = None;
+    let mut active_tasks: HashMap<String, ActiveRuntimeTask> = HashMap::new();
+    let mut task_joins: FuturesUnordered<TaggedJoin> = FuturesUnordered::new();
     let mut approval_tick = tokio::time::interval(Duration::from_secs(1));
     let replies = ServiceReplySink {
         state: state.clone(),
@@ -1225,15 +1256,14 @@ pub async fn run(
 
     loop {
         tokio::select! {
-            task_result = async {
-                let active_task = active_task.as_mut()?;
-                let handle = &mut active_task.handle;
-                Some(handle.await)
-            }, if active_task.is_some() => {
-                let current_task = active_task.take().ok_or_else(|| anyhow!("missing active task context"))?;
-                let joined = task_result.ok_or_else(|| anyhow!("missing active task result"))?;
-                let skill_reply_count = state.current_reply_sent_count().await;
-                state.deactivate_reply_context().await?;
+            Some((conv_key, joined)) = task_joins.next(), if !task_joins.is_empty() => {
+                let current_task = active_tasks
+                    .remove(&conv_key)
+                    .ok_or_else(|| anyhow!("missing active task context for {conv_key}"))?;
+                let skill_reply_count = state.reply_sent_count(&current_task.reply_token).await;
+                state
+                    .deactivate_reply_context(&current_task.reply_token)
+                    .await?;
 
                 match joined {
                     Ok(Ok(outcome)) => {
@@ -1331,25 +1361,35 @@ pub async fn run(
                     },
                 }
 
-                if scheduler.running().is_some() {
-                    let Some(next_task) = pending_tasks.pop_front() else {
-                        return Err(anyhow!("scheduler promoted queued task without pending payload"));
-                    };
-                    active_task = Some(
-                        start_runtime_task(
-                            next_task,
-                            &mut scheduler,
-                            RuntimeTaskDeps {
-                                replies: &replies,
-                                state: &state,
-                                codex: codex.clone(),
-                                state_store: state_store.clone(),
-                                config: &config,
-                            },
-                            true,
-                        )
-                        .await?,
-                    );
+                if scheduler.running_for(&conv_key).is_some() {
+                    let next_task = pending_tasks
+                        .get_mut(&conv_key)
+                        .and_then(|list| list.pop_front())
+                        .ok_or_else(|| {
+                            anyhow!("scheduler promoted queued task without pending payload")
+                        })?;
+                    if pending_tasks
+                        .get(&conv_key)
+                        .is_some_and(|list| list.is_empty())
+                    {
+                        pending_tasks.remove(&conv_key);
+                    }
+                    let (active, handle) = start_runtime_task(
+                        next_task,
+                        &mut scheduler,
+                        RuntimeTaskDeps {
+                            replies: &replies,
+                            state: &state,
+                            codex: codex.clone(),
+                            state_store: state_store.clone(),
+                            config: &config,
+                        },
+                        true,
+                    )
+                    .await?;
+                    let key = active.task.conversation_key.clone();
+                    task_joins.push(tag_join(key.clone(), handle));
+                    active_tasks.insert(key, active);
                 }
             },
             event = event_rx.recv() => {
@@ -1362,26 +1402,27 @@ pub async fn run(
                                 &mut scheduler,
                                 &mut pending_tasks,
                                 &mut pending_approvals,
-                                active_task.as_ref(),
+                                &active_tasks,
                                 &state_store,
                                 &config,
                             )
                             .await? {
-                                active_task = Some(
-                                    start_runtime_task(
-                                        task,
-                                        &mut scheduler,
-                                        RuntimeTaskDeps {
-                                            replies: &replies,
-                                            state: &state,
-                                            codex: codex.clone(),
-                                            state_store: state_store.clone(),
-                                            config: &config,
-                                        },
-                                        false,
-                                    )
-                                    .await?,
-                                );
+                                let (active, handle) = start_runtime_task(
+                                    task,
+                                    &mut scheduler,
+                                    RuntimeTaskDeps {
+                                        replies: &replies,
+                                        state: &state,
+                                        codex: codex.clone(),
+                                        state_store: state_store.clone(),
+                                        config: &config,
+                                    },
+                                    false,
+                                )
+                                .await?;
+                                let key = active.task.conversation_key.clone();
+                                task_joins.push(tag_join(key.clone(), handle));
+                                active_tasks.insert(key, active);
                             }
                             continue;
                         }
@@ -1397,28 +1438,29 @@ pub async fn run(
                                             pending_tasks: &mut pending_tasks,
                                             retryable_tasks: &mut retryable_tasks,
                                             pending_approvals: &mut pending_approvals,
-                                            active_task: active_task.as_ref(),
+                                            active_tasks: &active_tasks,
                                             codex: &codex,
                                             state_store: &state_store,
                                             config: &config,
                                         },
                                     )
                                     .await? {
-                                        active_task = Some(
-                                            start_runtime_task(
-                                                task,
-                                                &mut scheduler,
-                                                RuntimeTaskDeps {
-                                                    replies: &replies,
-                                                    state: &state,
-                                                    codex: codex.clone(),
-                                                    state_store: state_store.clone(),
-                                                    config: &config,
-                                                },
-                                                false,
-                                            )
-                                            .await?,
-                                        );
+                                        let (active, handle) = start_runtime_task(
+                                            task,
+                                            &mut scheduler,
+                                            RuntimeTaskDeps {
+                                                replies: &replies,
+                                                state: &state,
+                                                codex: codex.clone(),
+                                                state_store: state_store.clone(),
+                                                config: &config,
+                                            },
+                                            false,
+                                        )
+                                        .await?;
+                                        let key = active.task.conversation_key.clone();
+                                        task_joins.push(tag_join(key.clone(), handle));
+                                        active_tasks.insert(key, active);
                                     }
                                 },
                                 RouteDecision::Task(task) => {
@@ -1448,7 +1490,7 @@ pub async fn run(
                                             config.admin_user_id,
                                         )
                                         .await?;
-                                    } else if active_task.is_some() {
+                                    } else if active_tasks.contains_key(&task.conversation_key) {
                                         enqueue_runtime_task(
                                             ScheduledRuntimeTask::fresh(task),
                                             &replies,
@@ -1457,21 +1499,22 @@ pub async fn run(
                                         )
                                         .await?;
                                     } else {
-                                        active_task = Some(
-                                            start_runtime_task(
-                                                ScheduledRuntimeTask::fresh(task),
-                                                &mut scheduler,
-                                                RuntimeTaskDeps {
-                                                    replies: &replies,
-                                                    state: &state,
-                                                    codex: codex.clone(),
-                                                    state_store: state_store.clone(),
-                                                    config: &config,
-                                                },
-                                                false,
-                                            )
-                                            .await?,
-                                        );
+                                        let (active, handle) = start_runtime_task(
+                                            ScheduledRuntimeTask::fresh(task),
+                                            &mut scheduler,
+                                            RuntimeTaskDeps {
+                                                replies: &replies,
+                                                state: &state,
+                                                codex: codex.clone(),
+                                                state_store: state_store.clone(),
+                                                config: &config,
+                                            },
+                                            false,
+                                        )
+                                        .await?;
+                                        let key = active.task.conversation_key.clone();
+                                        task_joins.push(tag_join(key.clone(), handle));
+                                        active_tasks.insert(key, active);
                                     }
                                 },
                             }
@@ -1497,7 +1540,7 @@ pub async fn run(
                         pending_tasks: &mut pending_tasks,
                         retryable_tasks: &mut retryable_tasks,
                         pending_approvals: &mut pending_approvals,
-                        active_task: active_task.as_ref(),
+                        active_tasks: &active_tasks,
                         codex: &codex,
                         state_store: &state_store,
                         config: &config,
@@ -1506,12 +1549,11 @@ pub async fn run(
                 .await;
                 match handle_result {
                     Ok(Some(task)) => {
-                        active_task = Some(
-                            start_runtime_task(
-                                task,
-                                &mut scheduler,
-                                RuntimeTaskDeps {
-                                    replies: &replies,
+                        let (active, handle) = start_runtime_task(
+                            task,
+                            &mut scheduler,
+                            RuntimeTaskDeps {
+                                replies: &replies,
                                 state: &state,
                                 codex: codex.clone(),
                                 state_store: state_store.clone(),
@@ -1519,9 +1561,11 @@ pub async fn run(
                             },
                             false,
                         )
-                        .await?,
-                    );
-                }
+                        .await?;
+                        let key = active.task.conversation_key.clone();
+                        task_joins.push(tag_join(key.clone(), handle));
+                        active_tasks.insert(key, active);
+                    },
                     Ok(None) => {},
                     Err(error) => {
                         error!("control command handler failed, orchestrator continues: {error:#}");

@@ -1737,3 +1737,62 @@ async fn send_reply_best_effort_swallows_error_with_log() {
     codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, false, 1, "hi".into()).await;
     codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, true, 2, "hi".into()).await;
 }
+
+#[tokio::test]
+async fn distinct_conversations_run_their_turns_concurrently() {
+    // Both tasks block in wait_for_turn until interrupt_notify fires. If the
+    // orchestrator still serialised tasks at the global level, the second
+    // start_turn would never happen until the first finishes — so the second
+    // ensure_thread_calls entry would never be observed within the timeout.
+    let codex = Arc::new(FakeCodexExecutor::blocking(
+        vec!["thread-priv", "thread-group"],
+        "turn-x",
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    // Admin private chat — bypasses friend gate and approval.
+    state.publish_event(make_private_event_from(2_394_626_220, "admin", 9401, "私聊长跑"));
+    // Admin group chat — bypasses approval too.
+    state.publish_event(make_group_event_from(
+        2_394_626_220,
+        "admin",
+        7777,
+        9402,
+        "群里也长跑",
+    ));
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if codex.ensure_thread_calls().await.len() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both ensure_thread calls observed; concurrency works");
+
+    let calls = codex.ensure_thread_calls().await;
+    let conversations: std::collections::HashSet<&String> =
+        calls.iter().map(|(key, _)| key).collect();
+    assert!(conversations.contains(&"private:2394626220".to_string()));
+    assert!(conversations.contains(&"group:7777".to_string()));
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
