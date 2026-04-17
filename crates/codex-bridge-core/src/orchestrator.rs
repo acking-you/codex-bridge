@@ -732,7 +732,7 @@ async fn handle_runtime_command(
         state_store,
         config,
     } = deps;
-    let is_admin_private = !command.is_group && command.source_sender_id == config.admin_user_id;
+    let is_admin = command.source_sender_id == config.admin_user_id;
     match command.command {
         ControlCommand::Help => {
             info!(
@@ -749,7 +749,7 @@ async fn handle_runtime_command(
             .await?;
             Ok(None)
         },
-        _ if !is_admin_private => {
+        _ if !is_admin => {
             send_reply(
                 replies,
                 command.is_group,
@@ -954,21 +954,57 @@ async fn handle_runtime_command(
             Ok(None)
         },
         ControlCommand::Clear => {
+            let deleted = {
+                let store = state_store.lock().await;
+                store.delete_binding(&command.conversation_key)?
+            };
             send_reply(
                 replies,
                 command.is_group,
                 command.reply_target_id,
-                "上下文管理能力尚未接入。".to_string(),
+                if deleted {
+                    reply_formatter::format_clear_success()
+                } else {
+                    reply_formatter::format_clear_missing()
+                },
             )
             .await?;
             Ok(None)
         },
         ControlCommand::Compact => {
+            let binding = {
+                let store = state_store.lock().await;
+                store.binding(&command.conversation_key)?
+            };
+            let Some(binding) = binding else {
+                send_reply(
+                    replies,
+                    command.is_group,
+                    command.reply_target_id,
+                    reply_formatter::format_compact_missing(),
+                )
+                .await?;
+                return Ok(None);
+            };
+            if active_task
+                .map(|task| task.task.conversation_key == command.conversation_key)
+                .unwrap_or(false)
+            {
+                send_reply(
+                    replies,
+                    command.is_group,
+                    command.reply_target_id,
+                    reply_formatter::format_compact_busy(),
+                )
+                .await?;
+                return Ok(None);
+            }
+            codex.compact_thread(&binding.thread_id).await?;
             send_reply(
                 replies,
                 command.is_group,
                 command.reply_target_id,
-                "上下文管理能力尚未接入。".to_string(),
+                reply_formatter::format_compact_started(),
             )
             .await?;
             Ok(None)

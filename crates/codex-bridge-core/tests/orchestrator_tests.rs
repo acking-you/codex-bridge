@@ -290,6 +290,22 @@ fn make_command_request_from(sender_id: i64, command: ControlCommand) -> Command
     }
 }
 
+fn make_group_command_request(sender_id: i64, group_id: i64, command: ControlCommand) -> CommandRequest {
+    CommandRequest {
+        command,
+        conversation_key: format!("group:{group_id}"),
+        reply_target_id: group_id,
+        is_group: true,
+        source_message_id: 9100,
+        source_sender_id: sender_id,
+        source_sender_name: if sender_id == 2_394_626_220 {
+            "admin".to_string()
+        } else {
+            "LB".to_string()
+        },
+    }
+}
+
 fn spawn_bridge_sink(
     mut command_rx: mpsc::Receiver<ServiceCommand>,
     sent_messages: Arc<StdMutex<Vec<String>>>,
@@ -778,6 +794,404 @@ async fn admin_group_message_bypasses_approval() {
         "admin group requests must not generate approval notices"
     );
     assert_eq!(codex.ensure_thread_calls().await, vec![("group:778".to_string(), None)]);
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn admin_group_status_command_is_allowed() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-1"], "turn-1", "ok"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex,
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state
+        .send_control_command(make_group_command_request(
+            2_394_626_220,
+            777,
+            ControlCommand::Status {
+                task_id: None,
+            },
+        ))
+        .await
+        .expect("status command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("当前任务"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admin group status reply");
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn non_admin_group_status_command_is_rejected() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-unused"], "turn-1", "ok"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state
+        .send_control_command(make_group_command_request(
+            42,
+            777,
+            ControlCommand::Status {
+                task_id: None,
+            },
+        ))
+        .await
+        .expect("status command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text == "这个命令只开放给管理员。")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("non-admin group status denied");
+    assert!(codex.ensure_thread_calls().await.is_empty());
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn compact_command_without_binding_reports_missing_context() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-unused"], "turn-1", "ok"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state
+        .send_control_command(make_group_command_request(
+            2_394_626_220,
+            777,
+            ControlCommand::Compact,
+        ))
+        .await
+        .expect("compact command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("没有可压缩的上下文"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compact missing-context reply");
+    assert!(codex.compact_calls().await.is_empty());
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn clear_command_removes_current_conversation_binding_and_next_turn_uses_new_thread() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(
+        vec!["thread-reset"],
+        "turn-reset",
+        "ok",
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    store
+        .lock()
+        .await
+        .upsert_binding(&ConversationBinding {
+            conversation_key: "group:777".to_string(),
+            thread_id: "thread-old".to_string(),
+        })
+        .expect("seed binding");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state
+        .send_control_command(make_group_command_request(
+            2_394_626_220,
+            777,
+            ControlCommand::Clear,
+        ))
+        .await
+        .expect("clear command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("上下文已清空"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("clear reply");
+
+    assert!(
+        store
+            .lock()
+            .await
+            .binding("group:777")
+            .expect("query cleared binding")
+            .is_none()
+    );
+
+    state.publish_event(make_group_event_from(
+        2_394_626_220,
+        "admin",
+        777,
+        9101,
+        "清空后重新开始",
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !codex.ensure_thread_calls().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("next task should start");
+
+    let calls = codex.ensure_thread_calls().await;
+    assert_eq!(calls[0], ("group:777".to_string(), None));
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn compact_command_starts_thread_compaction_when_idle() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-unused"], "turn-1", "ok"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    store
+        .lock()
+        .await
+        .upsert_binding(&ConversationBinding {
+            conversation_key: "group:777".to_string(),
+            thread_id: "thread-compact".to_string(),
+        })
+        .expect("seed binding");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state
+        .send_control_command(make_group_command_request(
+            2_394_626_220,
+            777,
+            ControlCommand::Compact,
+        ))
+        .await
+        .expect("compact command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("已发起当前会话的上下文压缩"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compact started reply");
+    assert_eq!(codex.compact_calls().await, vec!["thread-compact".to_string()]);
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn compact_command_for_running_conversation_reports_busy() {
+    let codex = Arc::new(FakeCodexExecutor::blocking(vec!["thread-busy"], "turn-busy"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    store
+        .lock()
+        .await
+        .upsert_binding(&ConversationBinding {
+            conversation_key: "group:777".to_string(),
+            thread_id: "thread-busy".to_string(),
+        })
+        .expect("seed binding");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_group_event_from(
+        2_394_626_220,
+        "admin",
+        777,
+        9201,
+        "执行中的群任务",
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state
+                .task_snapshot()
+                .await
+                .running_conversation_key
+                .as_deref()
+                == Some("group:777")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("group task running");
+
+    state
+        .send_control_command(make_group_command_request(
+            2_394_626_220,
+            777,
+            ControlCommand::Compact,
+        ))
+        .await
+        .expect("compact command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("当前会话正在执行任务"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compact busy reply");
+    assert!(codex.compact_calls().await.is_empty());
+
+    state
+        .send_control_command(make_group_command_request(
+            2_394_626_220,
+            777,
+            ControlCommand::Cancel,
+        ))
+        .await
+        .expect("cancel running task");
 
     run_handle.abort();
     bridge_handle.abort();

@@ -23,8 +23,8 @@ pub fn format_failure(message: &str) -> String {
 /// Return the help text describing trigger rules and local commands.
 pub fn format_help() -> String {
     "触发方式：私聊默认触发，但非好友不会接入；群里需要先 \
-     @我。除管理员私聊外，其他任务都要先过管理员确认。\n命令：/help /status /queue /cancel \
-     /retry_last /approve <task_id> /deny \
+     @我。管理员可在私聊或群里 @我 使用管理命令，群聊非管理员任务仍需管理员确认。\n命令：/help /status /queue /cancel \
+     /retry_last /clear /compact /approve <task_id> /deny \
      <task_id>\n权限：全机可读，仅当前仓库可写，新文件只会写到 .run/artifacts/，危险操作会被拒绝。"
         .to_string()
 }
@@ -43,7 +43,32 @@ pub fn format_waiting_for_admin_approval_duplicate() -> String {
 /// Return the message shown when a non-admin user attempts an admin-only
 /// command.
 pub fn format_admin_only_command() -> String {
-    "这个命令只开放给管理员私聊使用。".to_string()
+    "这个命令只开放给管理员。".to_string()
+}
+
+/// Return the message shown when current conversation context is cleared.
+pub fn format_clear_success() -> String {
+    "当前会话上下文已清空；下次会从新线程开始。".to_string()
+}
+
+/// Return the message shown when there is no current conversation context.
+pub fn format_clear_missing() -> String {
+    "当前会话没有可清空的上下文。".to_string()
+}
+
+/// Return the message shown when compaction is started.
+pub fn format_compact_started() -> String {
+    "已发起当前会话的上下文压缩。".to_string()
+}
+
+/// Return the message shown when there is no thread to compact.
+pub fn format_compact_missing() -> String {
+    "当前会话还没有可压缩的上下文。".to_string()
+}
+
+/// Return the message shown when current conversation is busy.
+pub fn format_compact_busy() -> String {
+    "当前会话正在执行任务；先等它结束，或先 /cancel。".to_string()
 }
 
 /// Return the message shown when a waiting task is denied.
