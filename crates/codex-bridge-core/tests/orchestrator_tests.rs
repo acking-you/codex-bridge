@@ -278,6 +278,27 @@ fn make_group_event_from(
     NormalizedEvent::try_from(raw).expect("normalize group event")
 }
 
+fn make_group_reaction_event(
+    operator_id: i64,
+    group_id: i64,
+    message_id: i64,
+    emoji_id: &str,
+    is_add: bool,
+) -> NormalizedEvent {
+    serde_json::json!({
+        "post_type": "notice",
+        "notice_type": "group_msg_emoji_like",
+        "group_id": group_id,
+        "user_id": operator_id,
+        "message_id": message_id,
+        "self_id": 2993013575i64,
+        "likes": [{ "emoji_id": emoji_id, "count": 1 }],
+        "is_add": is_add
+    })
+    .try_into()
+    .expect("normalize reaction event")
+}
+
 fn make_command_request_from(sender_id: i64, command: ControlCommand) -> CommandRequest {
     CommandRequest {
         command,
@@ -647,7 +668,7 @@ async fn non_friend_private_message_is_rejected_before_codex() {
 }
 
 #[tokio::test]
-async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fallback() {
+async fn non_admin_group_message_is_approved_by_admin_salute_reaction() {
     let codex = Arc::new(FakeCodexExecutor::with_status(
         vec!["thread-8"],
         "turn-8",
@@ -697,15 +718,11 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
             .expect("messages")
             .iter()
             .any(|text| text.contains("待审批任务：")),
-        "admin private approval notice should be sent for non-admin group requests"
+        "admin private approval notice should still be sent for non-admin group requests"
     );
 
-    state
-        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
-            task_id: pending.task_id,
-        }))
-        .await
-        .expect("approve group task");
+    assert_eq!(pending.status, TaskStatus::PendingApproval);
+    state.publish_event(make_group_reaction_event(2_394_626_220, 777, 5001, "282", true));
 
     timeout(Duration::from_secs(1), async {
         loop {
@@ -722,6 +739,138 @@ async fn group_start_uses_salute_and_completed_turn_without_skill_reply_gets_fal
     })
     .await
     .expect("group salute and fallback reply");
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn approve_command_rejects_group_pending_task() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-unused"], "turn-unused", "ok"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_group_event_from(42, "LB", 777, 5101, "帮我跑一下"));
+    let pending = timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(task) = store
+                .lock()
+                .await
+                .latest_task_for_conversation("group:777")
+                .expect("query latest")
+            {
+                break task;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending task appears");
+
+    state
+        .send_control_command(make_command_request_from(
+            2_394_626_220,
+            ControlCommand::Approve {
+                task_id: pending.task_id.clone(),
+            },
+        ))
+        .await
+        .expect("approve command");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("请对原群消息点敬礼表情"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approve correction reply");
+    assert!(codex.ensure_thread_calls().await.is_empty());
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn non_admin_or_wrong_emoji_reaction_does_not_approve_group_task() {
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-unused"], "turn-unused", "ok"));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_group_event_from(42, "LB", 777, 5201, "还在等审批"));
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(task) = store
+                .lock()
+                .await
+                .latest_task_for_conversation("group:777")
+                .expect("query latest")
+            {
+                if task.status == TaskStatus::PendingApproval {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending task appears");
+
+    state.publish_event(make_group_reaction_event(42, 777, 5201, "282", true));
+    state.publish_event(make_group_reaction_event(2_394_626_220, 777, 5201, "13", true));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let task = store
+        .lock()
+        .await
+        .latest_task_for_conversation("group:777")
+        .expect("query latest task")
+        .expect("pending task exists");
+    assert_eq!(task.status, TaskStatus::PendingApproval);
+    assert!(codex.ensure_thread_calls().await.is_empty());
+    assert!(
+        sent_messages
+            .lock()
+            .expect("messages")
+            .iter()
+            .all(|text| text != "REACTION:5201:282")
+    );
 
     run_handle.abort();
     bridge_handle.abort();

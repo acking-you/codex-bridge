@@ -686,6 +686,23 @@ async fn register_pending_approval(
         }
     }
 
+    if task.is_group {
+        send_reply(
+            replies,
+            true,
+            task.reply_target_id,
+            reply_formatter::format_waiting_for_admin_group_approval(),
+        )
+        .await?;
+        replies
+            .send_private(
+                admin_user_id,
+                reply_formatter::format_admin_group_approval_notice(&pending),
+            )
+            .await?;
+        return Ok(());
+    }
+
     send_reply(
         replies,
         task.is_group,
@@ -714,6 +731,61 @@ async fn register_pending_approval(
             reply_formatter::format_admin_status_command(&pending.task_id),
         )
         .await
+}
+
+async fn approve_pending_task(
+    pending: PendingApproval,
+    replies: &dyn ReplySink,
+    scheduler: &mut Scheduler,
+    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    state_store: &Arc<Mutex<StateStore>>,
+    active_task: Option<&ActiveRuntimeTask>,
+) -> Result<Option<ScheduledRuntimeTask>> {
+    let scheduled = ScheduledRuntimeTask::persisted(pending.task_id.clone(), pending.task.clone());
+    if active_task.is_some() {
+        {
+            let store = state_store.lock().await;
+            store.update_task_status(&pending.task_id, TaskStatus::Queued)?;
+        }
+        enqueue_runtime_task(scheduled, replies, scheduler, pending_tasks).await?;
+        Ok(None)
+    } else {
+        Ok(Some(scheduled))
+    }
+}
+
+async fn handle_group_reaction_approval(
+    reaction: crate::events::GroupMessageReactionEvent,
+    replies: &dyn ReplySink,
+    scheduler: &mut Scheduler,
+    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_approvals: &mut PendingApprovalPool,
+    active_task: Option<&ActiveRuntimeTask>,
+    state_store: &Arc<Mutex<StateStore>>,
+    config: &OrchestratorConfig,
+) -> Result<Option<ScheduledRuntimeTask>> {
+    if !reaction.is_add
+        || reaction.operator_id != config.admin_user_id
+        || reaction.emoji_id != config.group_start_reaction_emoji_id
+    {
+        return Ok(None);
+    }
+
+    let Some(pending) =
+        pending_approvals.take_group_by_source_message(reaction.group_id, reaction.message_id)
+    else {
+        return Ok(None);
+    };
+
+    approve_pending_task(
+        pending,
+        replies,
+        scheduler,
+        pending_tasks,
+        state_store,
+        active_task,
+    )
+    .await
 }
 
 async fn handle_runtime_command(
@@ -878,36 +950,48 @@ async fn handle_runtime_command(
                 %task_id,
                 "received approve command"
             );
-            let Some(pending) = pending_approvals.take(&task_id) else {
+            let Some(pending) = pending_approvals.get(&task_id).cloned() else {
                 send_reply(
                     replies,
-                    false,
+                    command.is_group,
                     command.reply_target_id,
                     reply_formatter::format_admin_task_not_found(&task_id),
                 )
                 .await?;
                 return Ok(None);
             };
-            let scheduled = ScheduledRuntimeTask::persisted(task_id.clone(), pending.task.clone());
-            if active_task.is_some() {
-                {
-                    let store = state_store.lock().await;
-                    store.update_task_status(&task_id, TaskStatus::Queued)?;
-                }
-                enqueue_runtime_task(scheduled, replies, scheduler, pending_tasks).await?;
-            } else {
+            if pending.task.is_group {
                 send_reply(
                     replies,
-                    false,
+                    command.is_group,
+                    command.reply_target_id,
+                    reply_formatter::format_group_approval_use_reaction(),
+                )
+                .await?;
+                return Ok(None);
+            }
+            let pending = pending_approvals.take(&task_id).expect("pending task still present");
+            if let Some(task) = approve_pending_task(
+                pending,
+                replies,
+                scheduler,
+                pending_tasks,
+                state_store,
+                active_task,
+            )
+            .await? {
+                send_reply(
+                    replies,
+                    command.is_group,
                     command.reply_target_id,
                     reply_formatter::format_admin_approved(&task_id),
                 )
                 .await?;
-                return Ok(Some(scheduled));
+                return Ok(Some(task));
             }
             send_reply(
                 replies,
-                false,
+                command.is_group,
                 command.reply_target_id,
                 reply_formatter::format_admin_approved(&task_id),
             )
@@ -1161,6 +1245,36 @@ pub async fn run(
             event = event_rx.recv() => {
                 match event {
                     Ok(event) => {
+                        if let crate::events::NormalizedEvent::GroupMessageReactionReceived(reaction) = &event {
+                            if let Some(task) = handle_group_reaction_approval(
+                                reaction.clone(),
+                                &replies,
+                                &mut scheduler,
+                                &mut pending_tasks,
+                                &mut pending_approvals,
+                                active_task.as_ref(),
+                                &state_store,
+                                &config,
+                            )
+                            .await? {
+                                active_task = Some(
+                                    start_runtime_task(
+                                        task,
+                                        &mut scheduler,
+                                        RuntimeTaskDeps {
+                                            replies: &replies,
+                                            state: &state,
+                                            codex: codex.clone(),
+                                            state_store: state_store.clone(),
+                                            config: &config,
+                                        },
+                                        false,
+                                    )
+                                    .await?,
+                                );
+                            }
+                            continue;
+                        }
                         if let Some(decision) = router.route_event(event) {
                             match decision {
                                 RouteDecision::Command(command_request) => {

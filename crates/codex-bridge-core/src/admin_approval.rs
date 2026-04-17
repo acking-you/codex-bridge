@@ -145,6 +145,21 @@ impl PendingApprovalPool {
         Some(pending)
     }
 
+    /// Remove and return one waiting group approval by source message.
+    pub fn take_group_by_source_message(
+        &mut self,
+        group_id: i64,
+        source_message_id: i64,
+    ) -> Option<PendingApproval> {
+        let task_id = self.by_task_id.iter().find_map(|(task_id, pending)| {
+            (pending.task.is_group
+                && pending.task.reply_target_id == group_id
+                && pending.task.source_message_id == source_message_id)
+                .then(|| task_id.clone())
+        })?;
+        self.take(&task_id)
+    }
+
     /// Remove and return all expired approvals at `now`.
     pub fn take_expired(&mut self, now: Instant) -> Vec<PendingApproval> {
         let expired_ids = self

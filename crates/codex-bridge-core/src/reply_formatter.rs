@@ -34,6 +34,12 @@ pub fn format_waiting_for_admin_approval() -> String {
     "这件事要先得到管理员点头……等他确认下来，我再继续。".to_string()
 }
 
+/// Return the message shown when a group request must wait for a salute
+/// reaction.
+pub fn format_waiting_for_admin_group_approval() -> String {
+    "这件事要先等管理员点头……请他对原消息点个敬礼表情。".to_string()
+}
+
 /// Return the message shown when one conversation is already waiting for
 /// approval.
 pub fn format_waiting_for_admin_approval_duplicate() -> String {
@@ -93,6 +99,20 @@ pub fn format_admin_approval_notice(pending: &PendingApproval) -> String {
     )
 }
 
+/// Render the admin-facing approval notice for one pending group task.
+pub fn format_admin_group_approval_notice(pending: &PendingApproval) -> String {
+    format!(
+        "群待审批任务：{}\n群号：{}\n发起人：{} ({})\n消息：{}\n批准方式：请对原群消息点敬礼表情。\n可选管理：/status {} /deny {}",
+        pending.task_id,
+        pending.task.reply_target_id,
+        pending.task.source_sender_name,
+        pending.task.source_sender_id,
+        pending.task.source_text,
+        pending.task_id,
+        pending.task_id,
+    )
+}
+
 /// Render the admin command used to approve a waiting task.
 pub fn format_admin_approve_command(task_id: &str) -> String {
     format!("/approve {task_id}")
@@ -111,6 +131,12 @@ pub fn format_admin_status_command(task_id: &str) -> String {
 /// Render the admin-facing result after approving a task.
 pub fn format_admin_approved(task_id: &str) -> String {
     format!("已批准任务：{task_id}")
+}
+
+/// Render the admin-facing message when a group pending task must use
+/// reaction approval.
+pub fn format_group_approval_use_reaction() -> String {
+    "群聊待审批任务不能用 /approve；请对原群消息点敬礼表情。".to_string()
 }
 
 /// Render the admin-facing result after denying a task.
