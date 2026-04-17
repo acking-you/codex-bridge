@@ -56,6 +56,23 @@ pub struct GroupMessageEvent {
     pub raw: Value,
 }
 
+/// A group-message reaction event normalized for local consumers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GroupMessageReactionEvent {
+    /// Target group identifier.
+    pub group_id: i64,
+    /// QQ identifier of the reacting operator.
+    pub operator_id: i64,
+    /// Target message identifier from OneBot event.
+    pub message_id: i64,
+    /// Emoji identifier reported by the transport.
+    pub emoji_id: String,
+    /// Whether the reaction was added rather than removed.
+    pub is_add: bool,
+    /// Raw JSON payload for debugging.
+    pub raw: Value,
+}
+
 /// Normalized event variants exposed by the Rust bridge.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum NormalizedEvent {
@@ -63,6 +80,8 @@ pub enum NormalizedEvent {
     PrivateMessageReceived(PrivateMessageEvent),
     /// Incoming group message.
     GroupMessageReceived(GroupMessageEvent),
+    /// Incoming group message reaction notice.
+    GroupMessageReactionReceived(GroupMessageReactionEvent),
 }
 
 impl TryFrom<Value> for NormalizedEvent {
@@ -72,46 +91,95 @@ impl TryFrom<Value> for NormalizedEvent {
         let Some(post_type) = value.get("post_type").and_then(Value::as_str) else {
             return Err(NormalizeEventError::Unsupported);
         };
-        if post_type != "message" {
-            return Err(NormalizeEventError::Unsupported);
-        }
-
-        let Some(message_type) = value.get("message_type").and_then(Value::as_str) else {
-            return Err(NormalizeEventError::Unsupported);
-        };
-        let sender_id = extract_i64(&value, "user_id")?;
-        let self_id = extract_i64(&value, "self_id")?;
-        let message_id = extract_i64(&value, "message_id")?;
-        let mentions = extract_mentions(&value);
-        let mentions_self = mentions.contains(&self_id);
-        let text = extract_text(&value);
-        let sender_name = extract_sender_name(&value);
-
-        match message_type {
-            "private" => Ok(Self::PrivateMessageReceived(PrivateMessageEvent {
-                sender_id,
-                message_id,
-                sender_name,
-                self_id,
-                text,
-                mentions,
-                mentions_self,
-                raw: value,
-            })),
-            "group" => Ok(Self::GroupMessageReceived(GroupMessageEvent {
-                group_id: extract_i64(&value, "group_id")?,
-                sender_id,
-                message_id,
-                sender_name,
-                self_id,
-                text,
-                mentions,
-                mentions_self,
-                raw: value,
-            })),
+        match post_type {
+            "message" => normalize_message_event(value),
+            "notice" => normalize_notice_event(value),
             _ => Err(NormalizeEventError::Unsupported),
         }
     }
+}
+
+fn normalize_message_event(value: Value) -> Result<NormalizedEvent, NormalizeEventError> {
+    let Some(message_type) = value.get("message_type").and_then(Value::as_str) else {
+        return Err(NormalizeEventError::Unsupported);
+    };
+    let sender_id = extract_i64(&value, "user_id")?;
+    let self_id = extract_i64(&value, "self_id")?;
+    let message_id = extract_i64(&value, "message_id")?;
+    let mentions = extract_mentions(&value);
+    let mentions_self = mentions.contains(&self_id);
+    let text = extract_text(&value);
+    let sender_name = extract_sender_name(&value);
+
+    match message_type {
+        "private" => Ok(NormalizedEvent::PrivateMessageReceived(PrivateMessageEvent {
+            sender_id,
+            message_id,
+            sender_name,
+            self_id,
+            text,
+            mentions,
+            mentions_self,
+            raw: value,
+        })),
+        "group" => Ok(NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
+            group_id: extract_i64(&value, "group_id")?,
+            sender_id,
+            message_id,
+            sender_name,
+            self_id,
+            text,
+            mentions,
+            mentions_self,
+            raw: value,
+        })),
+        _ => Err(NormalizeEventError::Unsupported),
+    }
+}
+
+fn normalize_notice_event(value: Value) -> Result<NormalizedEvent, NormalizeEventError> {
+    match value.get("notice_type").and_then(Value::as_str) {
+        Some("group_msg_emoji_like") => Ok(NormalizedEvent::GroupMessageReactionReceived(
+            GroupMessageReactionEvent {
+                group_id: extract_i64(&value, "group_id")?,
+                operator_id: extract_i64(&value, "user_id")?,
+                message_id: extract_i64(&value, "message_id")?,
+                emoji_id: extract_notice_emoji_id(&value)?,
+                is_add: value.get("is_add").and_then(Value::as_bool).unwrap_or(true),
+                raw: value,
+            },
+        )),
+        Some("reaction") => Ok(NormalizedEvent::GroupMessageReactionReceived(
+            GroupMessageReactionEvent {
+                group_id: extract_i64(&value, "group_id")?,
+                operator_id: extract_i64(&value, "operator_id")?,
+                message_id: extract_i64(&value, "message_id")?,
+                emoji_id: value
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .ok_or(NormalizeEventError::Unsupported)?
+                    .to_string(),
+                is_add: value.get("sub_type").and_then(Value::as_str) == Some("add"),
+                raw: value,
+            },
+        )),
+        _ => Err(NormalizeEventError::Unsupported),
+    }
+}
+
+fn extract_notice_emoji_id(value: &Value) -> Result<String, NormalizeEventError> {
+    value
+        .get("likes")
+        .and_then(Value::as_array)
+        .and_then(|likes| likes.first())
+        .and_then(|like| like.get("emoji_id"))
+        .and_then(|emoji| {
+            emoji
+                .as_str()
+                .map(ToString::to_string)
+                .or_else(|| emoji.as_i64().map(|number| number.to_string()))
+        })
+        .ok_or(NormalizeEventError::Unsupported)
 }
 
 fn extract_i64(value: &Value, key: &str) -> Result<i64, NormalizeEventError> {

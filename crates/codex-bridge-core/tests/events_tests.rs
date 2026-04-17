@@ -92,3 +92,30 @@ fn private_message_event_preserves_raw_text() {
         other => panic!("unexpected event: {other:?}"),
     }
 }
+
+#[test]
+fn group_reaction_notice_extracts_operator_message_and_emoji() {
+    let raw = serde_json::json!({
+        "post_type": "notice",
+        "notice_type": "group_msg_emoji_like",
+        "group_id": 777,
+        "user_id": 2394626220i64,
+        "message_id": 5001,
+        "self_id": 2993013575i64,
+        "likes": [{ "emoji_id": "282", "count": 1 }],
+        "is_add": true
+    });
+
+    let event = NormalizedEvent::try_from(raw).expect("normalize reaction notice");
+
+    match event {
+        NormalizedEvent::GroupMessageReactionReceived(reaction) => {
+            assert_eq!(reaction.group_id, 777);
+            assert_eq!(reaction.operator_id, 2394626220);
+            assert_eq!(reaction.message_id, 5001);
+            assert_eq!(reaction.emoji_id, "282");
+            assert!(reaction.is_add);
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}

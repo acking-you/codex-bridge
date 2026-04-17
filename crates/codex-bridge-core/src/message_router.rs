@@ -33,6 +33,10 @@ pub enum ControlCommand {
         /// Stable task identifier.
         task_id: String,
     },
+    /// Clear the current conversation binding.
+    Clear,
+    /// Start compaction for the current conversation thread.
+    Compact,
 }
 
 /// Request object carrying metadata for task execution.
@@ -157,6 +161,7 @@ impl MessageRouter {
         match event {
             NormalizedEvent::PrivateMessageReceived(event) => self.route_private_message(event),
             NormalizedEvent::GroupMessageReceived(event) => self.route_group_message(event),
+            NormalizedEvent::GroupMessageReactionReceived(_) => None,
         }
     }
 
@@ -246,6 +251,8 @@ fn parse_command(text: &str) -> Option<ControlCommand> {
         Some("/deny") => parts.next().map(|task_id| ControlCommand::Deny {
             task_id: task_id.to_string(),
         }),
+        Some("/clear") => Some(ControlCommand::Clear),
+        Some("/compact") => Some(ControlCommand::Compact),
         _ => None,
     }
 }

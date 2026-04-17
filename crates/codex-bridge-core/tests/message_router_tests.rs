@@ -191,6 +191,54 @@ fn private_approve_command_keeps_task_id() {
 }
 
 #[test]
+fn clear_command_routes_from_private_chat() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 1006,
+        "user_id": 11,
+        "self_id": 99,
+        "message": [{ "type": "text", "data": { "text": "/clear" } }],
+        "sender": { "nickname": "alice" }
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize");
+    let mut router = MessageRouter::new();
+
+    let decision = router.route_event(event).expect("route decision");
+    assert!(matches!(
+        decision,
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Clear,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn compact_command_routes_from_private_chat() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 1007,
+        "user_id": 11,
+        "self_id": 99,
+        "message": [{ "type": "text", "data": { "text": "/compact" } }],
+        "sender": { "nickname": "alice" }
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize");
+    let mut router = MessageRouter::new();
+
+    let decision = router.route_event(event).expect("route decision");
+    assert!(matches!(
+        decision,
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Compact,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn deduper_returns_false_when_repeated_message_id_seen() {
     let mut deduper = MessageDeduper::default();
 
@@ -213,6 +261,24 @@ fn group_mention_only_message_is_ignored() {
         ]
     });
     let event = NormalizedEvent::try_from(raw).expect("normalize group message");
+    let mut router = MessageRouter::new();
+
+    assert!(router.route_event(event).is_none());
+}
+
+#[test]
+fn router_ignores_group_reaction_events() {
+    let raw = serde_json::json!({
+        "post_type": "notice",
+        "notice_type": "group_msg_emoji_like",
+        "group_id": 777,
+        "user_id": 2394626220i64,
+        "message_id": 5001,
+        "self_id": 2993013575i64,
+        "likes": [{ "emoji_id": "282", "count": 1 }],
+        "is_add": true
+    });
+    let event = NormalizedEvent::try_from(raw).expect("normalize");
     let mut router = MessageRouter::new();
 
     assert!(router.route_event(event).is_none());

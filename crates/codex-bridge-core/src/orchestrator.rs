@@ -159,6 +159,8 @@ async fn handle_command(
         ControlCommand::Deny {
             task_id,
         } => format!("审批能力尚未接入：{task_id}"),
+        ControlCommand::Clear => "上下文管理能力尚未接入。".to_string(),
+        ControlCommand::Compact => "上下文管理能力尚未接入。".to_string(),
     };
 
     send_reply(replies, is_group, target_id, text).await
@@ -947,6 +949,26 @@ async fn handle_runtime_command(
                 false,
                 command.reply_target_id,
                 reply_formatter::format_admin_denied(&task_id),
+            )
+            .await?;
+            Ok(None)
+        },
+        ControlCommand::Clear => {
+            send_reply(
+                replies,
+                command.is_group,
+                command.reply_target_id,
+                "上下文管理能力尚未接入。".to_string(),
+            )
+            .await?;
+            Ok(None)
+        },
+        ControlCommand::Compact => {
+            send_reply(
+                replies,
+                command.is_group,
+                command.reply_target_id,
+                "上下文管理能力尚未接入。".to_string(),
             )
             .await?;
             Ok(None)
