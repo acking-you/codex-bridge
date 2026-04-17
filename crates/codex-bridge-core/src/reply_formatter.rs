@@ -186,6 +186,12 @@ pub fn format_cancel_requested() -> String {
     "收到，我去把这条任务拦下来……等它停住。".to_string()
 }
 
+/// Return the message shown when a cancel command could not interrupt the
+/// running turn (for example when Codex restarted and lost the turn state).
+pub fn format_cancel_failed() -> String {
+    "取消失败，稍后再试；仍然卡住时可以 /clear 再重开对话。".to_string()
+}
+
 /// Return the message shown when the caller tries to cancel another user's
 /// task.
 pub fn format_cancel_denied() -> String {
@@ -236,4 +242,16 @@ fn format_recent_output_section(recent_output: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!("最近输出：\n{entries}"))
+}
+
+#[cfg(test)]
+mod cancel_failed_text_tests {
+    use super::format_cancel_failed;
+
+    #[test]
+    fn cancel_failed_text_mentions_retry_guidance() {
+        let text = format_cancel_failed();
+        assert!(text.contains("取消"));
+        assert!(text.contains("稍后"));
+    }
 }
