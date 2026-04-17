@@ -38,6 +38,7 @@ struct FakeCodexExecutor {
     progress_updates: Vec<String>,
     status: TurnStatus,
     wait_for_interrupt: bool,
+    fail_interrupt: bool,
 }
 
 impl FakeCodexExecutor {
@@ -67,6 +68,7 @@ impl FakeCodexExecutor {
             progress_updates: Vec::new(),
             status,
             wait_for_interrupt: false,
+            fail_interrupt: false,
         }
     }
 
@@ -87,6 +89,7 @@ impl FakeCodexExecutor {
             progress_updates: Vec::new(),
             status: TurnStatus::Interrupted,
             wait_for_interrupt: true,
+            fail_interrupt: false,
         }
     }
 
@@ -107,7 +110,13 @@ impl FakeCodexExecutor {
             progress_updates: progress_updates.into_iter().map(str::to_string).collect(),
             status: TurnStatus::Interrupted,
             wait_for_interrupt: true,
+            fail_interrupt: false,
         }
+    }
+
+    fn with_failing_interrupt(mut self) -> Self {
+        self.fail_interrupt = true;
+        self
     }
 
     async fn ensure_thread_calls(&self) -> Vec<(String, Option<String>)> {
@@ -185,6 +194,9 @@ impl CodexExecutor for FakeCodexExecutor {
             .lock()
             .await
             .push((thread_id.to_string(), turn_id.to_string()));
+        if self.fail_interrupt {
+            return Err(anyhow::anyhow!("simulated interrupt failure: codex restarted"));
+        }
         self.interrupt_notify.notify_waiters();
         Ok(())
     }
@@ -1640,6 +1652,70 @@ async fn pending_approval_expires_without_admin_reply() {
         .expect("expired task exists");
     assert_eq!(expired.status, TaskStatus::Expired);
     assert!(codex.ensure_thread_calls().await.is_empty());
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn cancel_command_replies_gracefully_when_interrupt_fails() {
+    let codex = Arc::new(
+        FakeCodexExecutor::blocking(vec!["thread-x"], "turn-x").with_failing_interrupt(),
+    );
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    // publish an event that will become the running task (admin bypasses approval gate)
+    state.publish_event(make_private_event_from(2_394_626_220, "admin", 9301, "长跑任务"));
+
+    // wait until the task is running
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state.task_snapshot().await.running_task_id.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("task running");
+
+    // send a Cancel command from the same sender (admin, 2_394_626_220)
+    state
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Cancel))
+        .await
+        .expect("cancel command");
+
+    // assert: the user eventually receives a cancel-failed reply
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sent_messages
+                .lock()
+                .expect("messages")
+                .iter()
+                .any(|text| text.contains("取消失败"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancel failed reply");
 
     run_handle.abort();
     bridge_handle.abort();

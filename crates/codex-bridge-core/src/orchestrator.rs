@@ -841,6 +841,29 @@ async fn compact_with_recovery(
     Ok(CompactOutcome::Started)
 }
 
+/// Attempt to interrupt an active turn and, if Codex has lost track of it,
+/// still return Ok so the scheduler slot is eventually released naturally.
+async fn interrupt_with_recovery(
+    codex: &dyn CodexExecutor,
+    active: &ActiveRuntimeTask,
+) -> Result<()> {
+    match codex
+        .interrupt(&active.active_turn.thread_id, &active.active_turn.turn_id)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if is_thread_unavailable_error(&error) => {
+            warn!(
+                thread_id = %active.active_turn.thread_id,
+                turn_id = %active.active_turn.turn_id,
+                "codex lost turn state before interrupt; dropping scheduler slot"
+            );
+            Ok(())
+        },
+        Err(error) => Err(error),
+    }
+}
+
 async fn handle_runtime_command(
     command: CommandRequest,
     deps: RuntimeCommandDeps<'_>,
@@ -937,24 +960,29 @@ async fn handle_runtime_command(
                 sender_id = command.source_sender_id,
                 "received cancel command"
             );
-            let text = if let Some(active_task) = active_task {
-                if command.source_sender_id != 0
-                    && command.source_sender_id != active_task.task.source_sender_id
-                {
-                    reply_formatter::format_cancel_denied()
-                } else {
-                    codex
-                        .interrupt(
-                            &active_task.active_turn.thread_id,
-                            &active_task.active_turn.turn_id,
-                        )
-                        .await?;
-                    reply_formatter::format_cancel_requested()
-                }
-            } else {
-                "当前没有正在执行的任务。".to_string()
+            let reply_text = match active_task {
+                Some(active) => {
+                    if command.source_sender_id != 0
+                        && command.source_sender_id != active.task.source_sender_id
+                    {
+                        reply_formatter::format_cancel_denied()
+                    } else {
+                        match interrupt_with_recovery(codex.as_ref(), active).await {
+                            Ok(()) => reply_formatter::format_cancel_requested(),
+                            Err(error) => {
+                                error!(
+                                    thread_id = %active.active_turn.thread_id,
+                                    turn_id = %active.active_turn.turn_id,
+                                    "cancel command failed: {error:#}"
+                                );
+                                reply_formatter::format_cancel_failed()
+                            },
+                        }
+                    }
+                },
+                None => "当前没有正在执行的任务。".to_string(),
             };
-            send_reply(replies, command.is_group, command.reply_target_id, text).await?;
+            send_reply(replies, command.is_group, command.reply_target_id, reply_text).await?;
             Ok(None)
         },
         ControlCommand::RetryLast => {
