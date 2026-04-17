@@ -281,6 +281,9 @@ fn sync_codex_config(paths: &RuntimePaths) -> Result<()> {
         return Ok(());
     }
     let destination_config = paths.codex_home_dir.join("config.toml");
+    if destination_config.exists() {
+        return Ok(());
+    }
     fs::copy(source_config, destination_config)?;
     Ok(())
 }

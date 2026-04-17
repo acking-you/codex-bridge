@@ -124,3 +124,41 @@ fn prepare_runtime_state_copies_codex_config_toml_into_isolated_home() {
         fs::read_to_string(source_config).unwrap()
     );
 }
+
+#[test]
+fn prepare_runtime_state_keeps_existing_isolated_codex_config_toml() {
+    let _guard = env_lock().lock().unwrap();
+    let project_root = tempdir().unwrap();
+    let qq_root = tempdir().unwrap();
+    let source_codex_home = tempdir().unwrap();
+    let source_config = source_codex_home.path().join("config.toml");
+    fs::write(&source_config, "model = \"from-source\"\n").unwrap();
+
+    let previous_codex_home = env::var_os("CODEX_HOME");
+    env::set_var("CODEX_HOME", source_codex_home.path());
+
+    let paths = RuntimePaths::new(project_root.path(), Some(qq_root.path().join("qq")));
+    fs::create_dir_all(&paths.codex_home_dir).unwrap();
+    let isolated_config = paths.codex_home_dir.join("config.toml");
+    fs::write(&isolated_config, "model = \"existing-runtime\"\n").unwrap();
+
+    let config = RuntimeConfig::default();
+    let result = codex_bridge_core::runtime::prepare_runtime_state(
+        &paths,
+        &config,
+        || "webui".into(),
+        || "ws".into(),
+    );
+
+    match previous_codex_home {
+        Some(value) => env::set_var("CODEX_HOME", value),
+        None => env::remove_var("CODEX_HOME"),
+    }
+
+    result.unwrap();
+
+    assert_eq!(
+        fs::read_to_string(isolated_config).unwrap(),
+        "model = \"existing-runtime\"\n"
+    );
+}
