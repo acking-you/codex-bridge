@@ -197,6 +197,13 @@ fn thread_resume_params_reapply_current_system_prompt() {
 }
 
 #[test]
+fn thread_compact_start_params_target_the_bound_thread() {
+    let params =
+        codex_bridge_core::codex_runtime::build_thread_compact_start_params("thread-compact-1");
+    assert_eq!(params.thread_id, "thread-compact-1");
+}
+
+#[test]
 fn turn_start_params_use_workspace_write_and_granular_approvals() {
     let dir = tempdir().expect("tempdir");
     let workspace_root = dir.path().join("workspace");

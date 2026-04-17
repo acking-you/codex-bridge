@@ -164,6 +164,18 @@ impl StateStore {
         .context("query conversation binding")
     }
 
+    /// Delete one existing binding by conversation key.
+    pub fn delete_binding(&self, conversation_key: &str) -> Result<bool> {
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM conversation_bindings WHERE conversation_key = ?1",
+                params![conversation_key],
+            )
+            .context("delete conversation binding")?;
+        Ok(deleted == 1)
+    }
+
     /// Insert a new task row and return the generated id.
     pub fn insert_task(&self, binding: &ConversationBinding, status: TaskStatus) -> Result<String> {
         self.insert_task_with_source(binding, status, 0, 0)

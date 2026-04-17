@@ -22,6 +22,26 @@ fn binding_round_trip() {
 }
 
 #[test]
+fn delete_binding_removes_only_requested_conversation() {
+    let store = StateStore::open_in_memory().expect("open in-memory store");
+    let first = ConversationBinding {
+        conversation_key: "group:777".to_string(),
+        thread_id: "thr-777".to_string(),
+    };
+    let second = ConversationBinding {
+        conversation_key: "group:888".to_string(),
+        thread_id: "thr-888".to_string(),
+    };
+
+    store.upsert_binding(&first).expect("upsert first");
+    store.upsert_binding(&second).expect("upsert second");
+
+    assert!(store.delete_binding("group:777").expect("delete binding"));
+    assert!(store.binding("group:777").expect("query deleted").is_none());
+    assert_eq!(store.binding("group:888").expect("query survivor"), Some(second));
+}
+
+#[test]
 fn running_task_marks_interrupted() {
     let store = StateStore::open_in_memory().expect("open in-memory store");
     let binding = ConversationBinding {

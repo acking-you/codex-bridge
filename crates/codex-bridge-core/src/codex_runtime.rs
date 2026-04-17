@@ -17,9 +17,9 @@ use codex_app_server_protocol::{
     FileChangeRequestApprovalParams, FileChangeRequestApprovalResponse, InitializeCapabilities,
     InitializeParams, InitializeResponse, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
     JSONRPCResponse, ReadOnlyAccess, RequestId, SandboxMode, SandboxPolicy, ServerNotification,
-    ServerRequest, ThreadItem, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, Turn, TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnStatus,
-    UserInput,
+    ServerRequest, ThreadCompactStartParams, ThreadCompactStartResponse, ThreadItem,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, Turn,
+    TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnStatus, UserInput,
 };
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
@@ -192,6 +192,9 @@ pub trait CodexExecutor: Send + Sync {
 
     /// Interrupt a running turn when supported.
     async fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<()>;
+
+    /// Start compaction for one existing thread.
+    async fn compact_thread(&self, thread_id: &str) -> Result<()>;
 }
 
 const RECENT_OUTPUT_LIMIT: usize = 4;
@@ -723,6 +726,19 @@ impl CodexExecutor for CodexRuntime {
         self.write_message(request).await?;
         Ok(())
     }
+
+    async fn compact_thread(&self, thread_id: &str) -> Result<()> {
+        info!(thread_id, "starting codex thread compaction");
+        let request_id = self.next_request_id().await;
+        let request = ClientRequest::ThreadCompactStart {
+            request_id: request_id.clone(),
+            params: build_thread_compact_start_params(thread_id),
+        };
+        let _: ThreadCompactStartResponse = self
+            .send_request(request, request_id, "thread/compact/start")
+            .await?;
+        Ok(())
+    }
 }
 
 async fn spawn_protocol_state(
@@ -1045,6 +1061,13 @@ pub fn build_thread_resume_params(
         persist_extended_history: true,
         ..Default::default()
     })
+}
+
+/// Build `thread/compact/start` params for one existing thread.
+pub fn build_thread_compact_start_params(thread_id: &str) -> ThreadCompactStartParams {
+    ThreadCompactStartParams {
+        thread_id: thread_id.to_string(),
+    }
 }
 
 fn discover_project_skills(workspace_root: &Path) -> Result<Vec<UserInput>> {

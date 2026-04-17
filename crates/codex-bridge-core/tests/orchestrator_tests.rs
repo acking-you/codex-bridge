@@ -31,6 +31,7 @@ struct FakeCodexExecutor {
     thread_ids: AsyncMutex<VecDeque<String>>,
     ensure_thread_calls: AsyncMutex<Vec<(String, Option<String>)>>,
     interrupt_calls: AsyncMutex<Vec<(String, String)>>,
+    compact_calls: AsyncMutex<Vec<String>>,
     interrupt_notify: Notify,
     turn_id: String,
     reply_text: String,
@@ -59,6 +60,7 @@ impl FakeCodexExecutor {
             ),
             ensure_thread_calls: AsyncMutex::new(Vec::new()),
             interrupt_calls: AsyncMutex::new(Vec::new()),
+            compact_calls: AsyncMutex::new(Vec::new()),
             interrupt_notify: Notify::new(),
             turn_id: turn_id.to_string(),
             reply_text: reply_text.to_string(),
@@ -78,6 +80,7 @@ impl FakeCodexExecutor {
             ),
             ensure_thread_calls: AsyncMutex::new(Vec::new()),
             interrupt_calls: AsyncMutex::new(Vec::new()),
+            compact_calls: AsyncMutex::new(Vec::new()),
             interrupt_notify: Notify::new(),
             turn_id: turn_id.to_string(),
             reply_text: String::new(),
@@ -97,6 +100,7 @@ impl FakeCodexExecutor {
             ),
             ensure_thread_calls: AsyncMutex::new(Vec::new()),
             interrupt_calls: AsyncMutex::new(Vec::new()),
+            compact_calls: AsyncMutex::new(Vec::new()),
             interrupt_notify: Notify::new(),
             turn_id: turn_id.to_string(),
             reply_text: String::new(),
@@ -112,6 +116,10 @@ impl FakeCodexExecutor {
 
     async fn interrupt_calls(&self) -> Vec<(String, String)> {
         self.interrupt_calls.lock().await.clone()
+    }
+
+    async fn compact_calls(&self) -> Vec<String> {
+        self.compact_calls.lock().await.clone()
     }
 }
 
@@ -178,6 +186,11 @@ impl CodexExecutor for FakeCodexExecutor {
             .await
             .push((thread_id.to_string(), turn_id.to_string()));
         self.interrupt_notify.notify_waiters();
+        Ok(())
+    }
+
+    async fn compact_thread(&self, thread_id: &str) -> Result<()> {
+        self.compact_calls.lock().await.push(thread_id.to_string());
         Ok(())
     }
 }
