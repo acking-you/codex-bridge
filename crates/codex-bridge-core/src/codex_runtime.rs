@@ -5,7 +5,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Mutex as StdMutex,
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -26,7 +26,8 @@ use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::Mutex,
+    sync::{mpsc, oneshot, Mutex},
+    task::JoinHandle,
 };
 use tracing::{info, warn};
 
@@ -81,14 +82,29 @@ impl CodexRuntimeConfig {
 }
 
 #[derive(Debug)]
-struct RuntimeReadState {
-    stdout: BufReader<ChildStdout>,
-    pending_notifications: VecDeque<JSONRPCNotification>,
-}
-
-#[derive(Debug)]
 struct RuntimeWriteState {
     stdin: BufWriter<ChildStdin>,
+}
+
+/// Outcome delivered from the demuxer to a waiting request.
+#[derive(Debug)]
+enum ResponseOutcome {
+    Ok(Value),
+    Err(String),
+}
+
+/// Shared demuxer state used by the background reader task and by request
+/// senders to route JSON-RPC responses and turn notifications to their
+/// respective waiters.
+#[derive(Debug, Default)]
+struct Demuxer {
+    /// Pending request-response handshakes, keyed by request id.
+    pending_responses: Mutex<HashMap<RequestId, oneshot::Sender<ResponseOutcome>>>,
+    /// Active per-thread notification senders held by the reader task.
+    thread_senders: Mutex<HashMap<String, mpsc::Sender<ServerNotification>>>,
+    /// Per-thread notification receivers, parked for consumption by
+    /// `wait_for_turn_*`. A fresh pair is created for each `start_turn`.
+    thread_receivers: Mutex<HashMap<String, mpsc::Receiver<ServerNotification>>>,
 }
 
 #[derive(Debug)]
@@ -322,22 +338,38 @@ impl RecentOutputTracker {
 #[derive(Debug)]
 pub struct CodexRuntime {
     _child: ChildGuard,
-    read_state: Mutex<RuntimeReadState>,
-    write_state: Mutex<RuntimeWriteState>,
+    _reader_task: JoinHandle<()>,
+    _approval_task: JoinHandle<()>,
+    demuxer: Arc<Demuxer>,
+    write_state: Arc<Mutex<RuntimeWriteState>>,
     config: CodexRuntimeConfig,
-    guard: ApprovalGuard,
+    guard: Arc<ApprovalGuard>,
     next_request_id: Mutex<u64>,
 }
 
 impl CodexRuntime {
     /// Create and initialize a runtime connected to a local app-server process.
     pub async fn new(config: CodexRuntimeConfig) -> Result<Self> {
-        let (child, write_state, read_state) = spawn_protocol_state(&config).await?;
+        let (child, write_state, stdout) = spawn_protocol_state(&config).await?;
+        let demuxer = Arc::new(Demuxer::default());
+        let guard = Arc::new(ApprovalGuard::new(&config.workspace_root));
+        let write_state = Arc::new(Mutex::new(write_state));
+
+        let (server_request_tx, server_request_rx) = mpsc::unbounded_channel();
+        let reader_task = tokio::spawn(reader_loop(stdout, demuxer.clone(), server_request_tx));
+        let approval_task = tokio::spawn(approval_loop(
+            server_request_rx,
+            guard.clone(),
+            write_state.clone(),
+        ));
+
         let runtime = Self {
             _child: ChildGuard::new(child),
-            read_state: Mutex::new(read_state),
-            write_state: Mutex::new(write_state),
-            guard: ApprovalGuard::new(&config.workspace_root),
+            _reader_task: reader_task,
+            _approval_task: approval_task,
+            demuxer,
+            write_state,
+            guard,
             config,
             next_request_id: Mutex::new(1),
         };
@@ -347,7 +379,7 @@ impl CodexRuntime {
 
     /// Replace the command guard used for approval requests.
     pub fn with_guard(mut self, guard: ApprovalGuard) -> Self {
-        self.guard = guard;
+        self.guard = Arc::new(guard);
         self
     }
 
@@ -401,72 +433,44 @@ impl CodexRuntime {
     {
         info!(method, "codex request started");
         let request = client_request_to_jsonrpc(request)?;
-        self.write_message(request).await?;
-        let mut state = self.read_state.lock().await;
-
-        loop {
-            match state.read_message().await? {
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id,
-                    result,
-                }) if id == request_id => {
-                    info!(method, "codex request completed");
-                    return serde_json::from_value(result)
-                        .with_context(|| format!("decode {method} response payload"));
-                },
-                JSONRPCMessage::Error(error) if error.id == request_id => {
-                    info!(method, error = %error.error.message, "codex request failed");
-                    return Err(anyhow!("{method} failed: {}", error.error.message));
-                },
-                JSONRPCMessage::Notification(notification) => {
-                    state.pending_notifications.push_back(notification);
-                },
-                JSONRPCMessage::Request(request) => {
-                    self.handle_server_request(request).await?;
-                },
-                JSONRPCMessage::Response(_) | JSONRPCMessage::Error(_) => {},
-            }
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.demuxer.pending_responses.lock().await;
+            pending.insert(request_id.clone(), tx);
         }
-    }
+        if let Err(error) = self.write_message(request).await {
+            // Write failed before the reader could produce any response for
+            // this id; drop the slot so subsequent ids are clean.
+            self.demuxer
+                .pending_responses
+                .lock()
+                .await
+                .remove(&request_id);
+            return Err(error).with_context(|| format!("write {method} request"));
+        }
 
-    async fn handle_server_request(&self, request: JSONRPCRequest) -> Result<()> {
-        let request = ServerRequest::try_from(request).context("decode server request")?;
-        log_server_request(&request);
-        match request {
-            ServerRequest::CommandExecutionRequestApproval {
-                request_id,
-                params,
-            } => {
-                let response = build_command_approval_response(&self.guard, &params);
-                info!(
-                    decision = ?response.decision,
-                    command = ?params.command,
-                    "command approval resolved"
-                );
-                self.write_response(request_id, response).await?;
+        match rx.await {
+            Ok(ResponseOutcome::Ok(result)) => {
+                info!(method, "codex request completed");
+                serde_json::from_value(result)
+                    .with_context(|| format!("decode {method} response payload"))
             },
-            ServerRequest::FileChangeRequestApproval {
-                request_id,
-                params,
-            } => {
-                let response = build_file_change_approval_response(&self.guard, &params);
-                info!(
-                    decision = ?response.decision,
-                    grant_root = ?params.grant_root,
-                    "file-change approval resolved"
-                );
-                self.write_response(request_id, response).await?;
+            Ok(ResponseOutcome::Err(message)) => {
+                info!(method, error = %message, "codex request failed");
+                Err(anyhow!("{method} failed: {message}"))
             },
-            other => {
-                return Err(anyhow!("unsupported server request: {other:?}"));
+            Err(_) => {
+                warn!(method, "codex runtime shut down before response arrived");
+                Err(anyhow!(
+                    "{method} failed: codex runtime shut down before response arrived"
+                ))
             },
         }
-        Ok(())
     }
 
     async fn wait_for_turn_completion(
         &self,
-        state: &mut RuntimeReadState,
+        mut notifications: mpsc::Receiver<ServerNotification>,
         thread_id: &str,
         turn_id: &str,
         progress: Option<&dyn TurnProgressSink>,
@@ -474,96 +478,83 @@ impl CodexRuntime {
         let mut items = Vec::new();
         let mut tracker = progress.map(|_| RecentOutputTracker::default());
         loop {
-            let message = if let Some(notification) = state.pending_notifications.pop_front() {
-                JSONRPCMessage::Notification(notification)
-            } else {
-                state.read_message().await?
+            let Some(notification) = notifications.recv().await else {
+                return Err(anyhow!(
+                    "codex notification channel for thread {thread_id} closed before turn {turn_id} completed"
+                ));
             };
+            log_server_notification(&notification);
 
-            match message {
-                JSONRPCMessage::Notification(notification) => {
-                    let notification = match ServerNotification::try_from(notification) {
-                        Ok(notification) => notification,
-                        Err(_) => continue,
-                    };
-                    log_server_notification(&notification);
-
-                    match notification {
-                        ServerNotification::AgentMessageDelta(payload) => {
-                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
-                                if let Some(recent_output) = tracker.push_delta(
-                                    &payload.item_id,
-                                    LiveOutputKind::AgentMessage,
-                                    &payload.delta,
-                                ) {
-                                    progress.update_recent_output(recent_output).await?;
-                                }
-                            }
-                        },
-                        ServerNotification::PlanDelta(payload) => {
-                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
-                                if let Some(recent_output) = tracker.push_delta(
-                                    &payload.item_id,
-                                    LiveOutputKind::Plan,
-                                    &payload.delta,
-                                ) {
-                                    progress.update_recent_output(recent_output).await?;
-                                }
-                            }
-                        },
-                        ServerNotification::CommandExecutionOutputDelta(payload) => {
-                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
-                                if let Some(recent_output) = tracker.push_delta(
-                                    &payload.item_id,
-                                    LiveOutputKind::CommandExecution,
-                                    &payload.delta,
-                                ) {
-                                    progress.update_recent_output(recent_output).await?;
-                                }
-                            }
-                        },
-                        ServerNotification::FileChangeOutputDelta(payload) => {
-                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
-                                if let Some(recent_output) = tracker.push_delta(
-                                    &payload.item_id,
-                                    LiveOutputKind::FileChange,
-                                    &payload.delta,
-                                ) {
-                                    progress.update_recent_output(recent_output).await?;
-                                }
-                            }
-                        },
-                        ServerNotification::ItemCompleted(payload) => {
-                            if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
-                                let (recent_output, committed_output) =
-                                    tracker.commit_item(&payload.item);
-                                if let Some(recent_output) = recent_output {
-                                    progress.update_recent_output(recent_output).await?;
-                                }
-                                if let Some(committed_output) = committed_output {
-                                    progress.commit_output(committed_output).await?;
-                                }
-                            }
-                            items.push(
-                                serde_json::to_value(payload.item)
-                                    .context("serialize completed item")?,
-                            );
-                        },
-                        ServerNotification::TurnCompleted(payload)
-                            if payload.thread_id == thread_id && payload.turn.id == turn_id =>
-                        {
-                            return Ok(TurnCompletion {
-                                turn: payload.turn,
-                                items,
-                            });
-                        },
-                        _ => {},
+            match notification {
+                ServerNotification::AgentMessageDelta(payload) => {
+                    if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                        if let Some(recent_output) = tracker.push_delta(
+                            &payload.item_id,
+                            LiveOutputKind::AgentMessage,
+                            &payload.delta,
+                        ) {
+                            progress.update_recent_output(recent_output).await?;
+                        }
                     }
                 },
-                JSONRPCMessage::Request(request) => {
-                    self.handle_server_request(request).await?;
+                ServerNotification::PlanDelta(payload) => {
+                    if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                        if let Some(recent_output) = tracker.push_delta(
+                            &payload.item_id,
+                            LiveOutputKind::Plan,
+                            &payload.delta,
+                        ) {
+                            progress.update_recent_output(recent_output).await?;
+                        }
+                    }
                 },
-                JSONRPCMessage::Response(_) | JSONRPCMessage::Error(_) => {},
+                ServerNotification::CommandExecutionOutputDelta(payload) => {
+                    if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                        if let Some(recent_output) = tracker.push_delta(
+                            &payload.item_id,
+                            LiveOutputKind::CommandExecution,
+                            &payload.delta,
+                        ) {
+                            progress.update_recent_output(recent_output).await?;
+                        }
+                    }
+                },
+                ServerNotification::FileChangeOutputDelta(payload) => {
+                    if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                        if let Some(recent_output) = tracker.push_delta(
+                            &payload.item_id,
+                            LiveOutputKind::FileChange,
+                            &payload.delta,
+                        ) {
+                            progress.update_recent_output(recent_output).await?;
+                        }
+                    }
+                },
+                ServerNotification::ItemCompleted(payload) => {
+                    if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
+                        let (recent_output, committed_output) =
+                            tracker.commit_item(&payload.item);
+                        if let Some(recent_output) = recent_output {
+                            progress.update_recent_output(recent_output).await?;
+                        }
+                        if let Some(committed_output) = committed_output {
+                            progress.commit_output(committed_output).await?;
+                        }
+                    }
+                    items.push(
+                        serde_json::to_value(payload.item)
+                            .context("serialize completed item")?,
+                    );
+                },
+                ServerNotification::TurnCompleted(payload)
+                    if payload.thread_id == thread_id && payload.turn.id == turn_id =>
+                {
+                    return Ok(TurnCompletion {
+                        turn: payload.turn,
+                        items,
+                    });
+                },
+                _ => {},
             }
         }
     }
@@ -575,6 +566,19 @@ impl CodexRuntime {
         RequestId::String(format!("codex-bridge-{id}"))
     }
 
+    async fn register_thread_channel(&self, thread_id: &str) {
+        let (tx, rx) = mpsc::channel::<ServerNotification>(256);
+        let mut senders = self.demuxer.thread_senders.lock().await;
+        let mut receivers = self.demuxer.thread_receivers.lock().await;
+        senders.insert(thread_id.to_string(), tx);
+        receivers.insert(thread_id.to_string(), rx);
+    }
+
+    async fn drop_thread_channel(&self, thread_id: &str) {
+        self.demuxer.thread_senders.lock().await.remove(thread_id);
+        self.demuxer.thread_receivers.lock().await.remove(thread_id);
+    }
+
     async fn write_message<T>(&self, message: T) -> Result<()>
     where
         T: serde::Serialize,
@@ -582,13 +586,177 @@ impl CodexRuntime {
         let mut state = self.write_state.lock().await;
         state.write_message(message).await
     }
+}
 
-    async fn write_response<T>(&self, request_id: RequestId, response: T) -> Result<()>
-    where
-        T: serde::Serialize,
-    {
-        let mut state = self.write_state.lock().await;
-        state.write_response(request_id, response).await
+/// Background reader task: demultiplexes JSON-RPC responses into pending
+/// `send_request` waiters and server notifications into per-thread channels.
+/// Server requests (approval prompts) are forwarded to the approval task.
+async fn reader_loop(
+    mut stdout: BufReader<ChildStdout>,
+    demuxer: Arc<Demuxer>,
+    server_request_tx: mpsc::UnboundedSender<JSONRPCRequest>,
+) {
+    loop {
+        let message = match read_jsonrpc_message(&mut stdout).await {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(%error, "codex reader task exiting");
+                break;
+            },
+        };
+        match message {
+            JSONRPCMessage::Response(JSONRPCResponse {
+                id,
+                result,
+            }) => {
+                let waiter = demuxer.pending_responses.lock().await.remove(&id);
+                if let Some(tx) = waiter {
+                    let _ = tx.send(ResponseOutcome::Ok(result));
+                }
+            },
+            JSONRPCMessage::Error(err) => {
+                let waiter = demuxer.pending_responses.lock().await.remove(&err.id);
+                if let Some(tx) = waiter {
+                    let _ = tx.send(ResponseOutcome::Err(err.error.message));
+                }
+            },
+            JSONRPCMessage::Notification(raw) => {
+                let notification = match ServerNotification::try_from(raw) {
+                    Ok(notification) => notification,
+                    Err(_) => continue,
+                };
+                let thread_id = match notification_thread_id(&notification) {
+                    Some(id) => id,
+                    None => {
+                        log_server_notification(&notification);
+                        continue;
+                    },
+                };
+                let sender = demuxer
+                    .thread_senders
+                    .lock()
+                    .await
+                    .get(&thread_id)
+                    .cloned();
+                match sender {
+                    Some(tx) => {
+                        if let Err(error) = tx.send(notification).await {
+                            warn!(thread_id = %thread_id, %error, "dropping notification for thread without active receiver");
+                        }
+                    },
+                    None => {
+                        // No active turn listening on this thread; drop.
+                    },
+                }
+            },
+            JSONRPCMessage::Request(raw) => {
+                if server_request_tx.send(raw).is_err() {
+                    warn!("approval task gone; ignoring server request");
+                }
+            },
+        }
+    }
+
+    // Reader is exiting. Drop all pending waiters so they see an error.
+    demuxer.pending_responses.lock().await.clear();
+    demuxer.thread_senders.lock().await.clear();
+    demuxer.thread_receivers.lock().await.clear();
+}
+
+/// Background approval task: serializes access to the runtime's write half
+/// for server-originated approval requests, keeping them off the hot request
+/// path.
+async fn approval_loop(
+    mut rx: mpsc::UnboundedReceiver<JSONRPCRequest>,
+    guard: Arc<ApprovalGuard>,
+    write_state: Arc<Mutex<RuntimeWriteState>>,
+) {
+    while let Some(raw) = rx.recv().await {
+        let request = match ServerRequest::try_from(raw) {
+            Ok(request) => request,
+            Err(error) => {
+                warn!(%error, "failed to decode codex server request");
+                continue;
+            },
+        };
+        log_server_request(&request);
+        match request {
+            ServerRequest::CommandExecutionRequestApproval {
+                request_id,
+                params,
+            } => {
+                let response = build_command_approval_response(&guard, &params);
+                info!(
+                    decision = ?response.decision,
+                    command = ?params.command,
+                    "command approval resolved"
+                );
+                let mut state = write_state.lock().await;
+                if let Err(error) = state.write_response(request_id, response).await {
+                    warn!(%error, "failed to write command approval response");
+                }
+            },
+            ServerRequest::FileChangeRequestApproval {
+                request_id,
+                params,
+            } => {
+                let response = build_file_change_approval_response(&guard, &params);
+                info!(
+                    decision = ?response.decision,
+                    grant_root = ?params.grant_root,
+                    "file-change approval resolved"
+                );
+                let mut state = write_state.lock().await;
+                if let Err(error) = state.write_response(request_id, response).await {
+                    warn!(%error, "failed to write file-change approval response");
+                }
+            },
+            other => {
+                warn!(?other, "ignoring unsupported server request");
+            },
+        }
+    }
+}
+
+async fn read_jsonrpc_message(stdout: &mut BufReader<ChildStdout>) -> Result<JSONRPCMessage> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = stdout.read_line(&mut line).await?;
+        if bytes == 0 {
+            return Err(anyhow!("codex app-server stdout closed"));
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let payload: Value = serde_json::from_str(trimmed).context("decode json-rpc payload")?;
+        return serde_json::from_value(payload).context("decode json-rpc message");
+    }
+}
+
+/// Extract the thread id tagged onto a server notification, if the variant
+/// carries one.
+fn notification_thread_id(notification: &ServerNotification) -> Option<String> {
+    match notification {
+        ServerNotification::TurnStarted(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::TurnCompleted(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::ItemStarted(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::ItemCompleted(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::RawResponseItemCompleted(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::AgentMessageDelta(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::PlanDelta(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::CommandExecutionOutputDelta(payload) => {
+            Some(payload.thread_id.clone())
+        },
+        ServerNotification::FileChangeOutputDelta(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::ReasoningSummaryTextDelta(payload) => {
+            Some(payload.thread_id.clone())
+        },
+        ServerNotification::ReasoningTextDelta(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::TurnPlanUpdated(payload) => Some(payload.thread_id.clone()),
+        ServerNotification::HookCompleted(payload) => Some(payload.thread_id.clone()),
+        _ => None,
     }
 }
 
@@ -662,14 +830,28 @@ impl CodexExecutor for CodexRuntime {
     }
 
     async fn start_turn(&self, thread_id: &str, input_text: &str) -> Result<ActiveTurn> {
+        // Register a fresh notification channel for this thread BEFORE
+        // writing turn/start so that the reader task does not drop any
+        // early notifications emitted by the app-server.
+        self.register_thread_channel(thread_id).await;
+
         let request_id = self.next_request_id().await;
         let request = ClientRequest::TurnStart {
             request_id: request_id.clone(),
             params: build_turn_start_params(&self.config, thread_id, input_text)?,
         };
         info!(thread_id, "starting codex turn");
-        let response: TurnStartResponse =
-            self.send_request(request, request_id, "turn/start").await?;
+        let response: TurnStartResponse = match self
+            .send_request(request, request_id, "turn/start")
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // turn/start failed; tear down the pre-registered channel.
+                self.drop_thread_channel(thread_id).await;
+                return Err(error);
+            },
+        };
         info!(thread_id, turn_id = %response.turn.id, "codex turn started");
 
         Ok(ActiveTurn {
@@ -692,10 +874,18 @@ impl CodexExecutor for CodexRuntime {
             turn_id = %active_turn.turn_id,
             "waiting for codex turn completion"
         );
-        let mut state = self.read_state.lock().await;
+        let notifications = {
+            let mut receivers = self.demuxer.thread_receivers.lock().await;
+            receivers.remove(&active_turn.thread_id).ok_or_else(|| {
+                anyhow!(
+                    "no notification channel registered for thread {}",
+                    active_turn.thread_id
+                )
+            })?
+        };
         let completion = self
             .wait_for_turn_completion(
-                &mut state,
+                notifications,
                 &active_turn.thread_id,
                 &active_turn.turn_id,
                 progress,
@@ -753,7 +943,7 @@ impl CodexExecutor for CodexRuntime {
 
 async fn spawn_protocol_state(
     config: &CodexRuntimeConfig,
-) -> Result<(Child, RuntimeWriteState, RuntimeReadState)> {
+) -> Result<(Child, RuntimeWriteState, BufReader<ChildStdout>)> {
     let command = build_codex_app_server_command(config);
     let mut child = Command::new(&command[0])
         .args(&command[1..])
@@ -779,10 +969,7 @@ async fn spawn_protocol_state(
         RuntimeWriteState {
             stdin: BufWriter::new(stdin),
         },
-        RuntimeReadState {
-            stdout: BufReader::new(stdout),
-            pending_notifications: VecDeque::new(),
-        },
+        BufReader::new(stdout),
     ))
 }
 
@@ -1012,28 +1199,6 @@ impl RuntimeWriteState {
             result: serde_json::to_value(response).context("serialize server response payload")?,
         })
         .await
-    }
-}
-
-impl RuntimeReadState {
-    async fn read_message(&mut self) -> Result<JSONRPCMessage> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let bytes = self.stdout.read_line(&mut line).await?;
-            if bytes == 0 {
-                return Err(anyhow!("codex app-server stdout closed"));
-            }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let payload: Value =
-                serde_json::from_str(trimmed).context("decode json-rpc payload")?;
-            return serde_json::from_value(payload).context("decode json-rpc message");
-        }
     }
 }
 
