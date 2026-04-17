@@ -108,7 +108,7 @@ fn normalize_message_event(value: Value) -> Result<NormalizedEvent, NormalizeEve
     let message_id = extract_i64(&value, "message_id")?;
     let mentions = extract_mentions(&value);
     let mentions_self = mentions.contains(&self_id);
-    let text = extract_text(&value);
+    let text = extract_text(&value, self_id);
     let sender_name = extract_sender_name(&value);
 
     match message_type {
@@ -241,26 +241,46 @@ fn extract_sender_name(value: &Value) -> String {
     "unknown".to_string()
 }
 
-fn extract_text(value: &Value) -> String {
-    if let Some(text) = value
-        .get("message")
-        .and_then(Value::as_array)
-        .map(|segments| {
-            segments
-                .iter()
-                .filter_map(|segment| {
-                    if segment.get("type").and_then(Value::as_str) != Some("text") {
-                        return None;
-                    }
-                    segment
+/// Render the message body as a flat string while preserving every `@`
+/// segment in a deterministic, agent-readable form.
+///
+/// - `@bot` (the bot's own self_id) becomes the literal placeholder
+///   `@<bot>` so the agent can recognise that it is being addressed without
+///   leaking its raw QQ id.
+/// - Any other `@user` becomes `@<QQ:1234>` so the agent can read the
+///   underlying QQ identifier and pass it through to follow-up actions.
+/// - Unknown segment types are dropped.
+fn extract_text(value: &Value, self_id: i64) -> String {
+    if let Some(segments) = value.get("message").and_then(Value::as_array) {
+        let mut buf = String::new();
+        for segment in segments {
+            let kind = segment.get("type").and_then(Value::as_str);
+            match kind {
+                Some("text") => {
+                    if let Some(text) = segment
                         .get("data")
                         .and_then(|data| data.get("text"))
                         .and_then(Value::as_str)
-                })
-                .collect::<String>()
-        })
-    {
-        return text.trim().to_string();
+                    {
+                        buf.push_str(text);
+                    }
+                },
+                Some("at") => {
+                    let qq = segment
+                        .get("data")
+                        .and_then(|data| data.get("qq"))
+                        .and_then(Value::as_str)
+                        .and_then(|raw| raw.parse::<i64>().ok());
+                    match qq {
+                        Some(id) if id == self_id => buf.push_str("@<bot>"),
+                        Some(id) => buf.push_str(&format!("@<QQ:{id}>")),
+                        None => {},
+                    }
+                },
+                _ => {},
+            }
+        }
+        return buf.trim().to_string();
     }
 
     let Some(raw_message) = value.get("raw_message").and_then(Value::as_str) else {

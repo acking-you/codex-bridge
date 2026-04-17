@@ -21,7 +21,8 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 - Use exactly one local `reply_current.py` command per message you want to send.
 - Attachments must already exist under `.run/artifacts/`.
 - Prefer text for short answers, image for visual output, and file for markdown/report artifacts.
-- If you want line breaks in QQ, put real newline characters in `--text`. Do not send the literal characters `\n` as a fake line break.
+- If you want line breaks in QQ, put real newline characters in `--text`. The plain `"..."` form in bash does NOT turn `\n` into a newline; use `$'line1\nline2'` (ANSI-C quoting), or split a `"..."` string across two source lines, or call this skill once per line. The bridge defensively decodes a stray `\n`/`\r\n`/`\t` if one slips through, but writing real newlines is cleaner.
+- Group messages reach you with mention markers preserved: `@<bot>` is the placeholder for an `@` aimed at the bot itself, and `@<QQ:1234567>` is the placeholder for an `@` aimed at any other user. Read those markers when relevant; do not echo them back into your reply.
 
 ## Commands
 Send plain text:

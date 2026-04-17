@@ -65,12 +65,38 @@ def build_payload(args: argparse.Namespace, context: dict[str, object], root: Pa
         "file": None,
     }
     if args.text is not None:
-        payload["text"] = args.text
+        payload["text"] = normalize_escape_sequences(args.text)
     elif args.image is not None:
         payload["image"] = str(resolve_user_path(args.image, root))
     else:
         payload["file"] = str(resolve_user_path(args.file, root))
     return payload
+
+
+def normalize_escape_sequences(text: str) -> str:
+    """Defensive decode of literal escape pairs that show up when the agent
+    quotes the --text argument with single quotes (or any shell form that does
+    not interpret backslash escapes).
+
+    Without this normalisation, text like 'line1\\nline2' would reach QQ as the
+    seven literal characters ``line1\\nline2`` instead of two real lines. The
+    bridge's system prompt asks the agent to use real newlines, but we also
+    decode here so a single shell-quoting slip does not produce a visibly
+    broken message in the chat.
+
+    The transformations are intentionally narrow and do not run a full
+    unicode_escape decode (which would also try to interpret things like
+    ``\\u00xx`` and could mangle legitimate backslashes in user content).
+    """
+    if not text:
+        return text
+    return (
+        text
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+        .replace("\\t", "\t")
+    )
 
 
 def resolve_user_path(path: Path, root: Path) -> Path:

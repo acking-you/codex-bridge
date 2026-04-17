@@ -211,7 +211,16 @@ impl MessageRouter {
             return None;
         }
 
-        if let Some(command) = parse_command(source_text) {
+        // Commands may be preceded by one or more `@<bot>` markers (the
+        // form extract_text uses for the bot's own mention). Strip them only
+        // when checking for a command; preserve the full text in the task
+        // payload so the agent can still see who was addressed.
+        let command_candidate = strip_leading_bot_mentions(source_text);
+        if command_candidate.is_empty() {
+            return None;
+        }
+
+        if let Some(command) = parse_command(command_candidate) {
             return Some(RouteDecision::Command(CommandRequest {
                 command,
                 conversation_key: format!("group:{}", event.group_id),
@@ -233,6 +242,17 @@ impl MessageRouter {
             reply_target_id: event.group_id,
         }))
     }
+}
+
+/// Drop one or more leading `@<bot>` markers (with surrounding whitespace) so
+/// the remainder can be inspected for a `/command` prefix. The returned slice
+/// borrows from the input.
+fn strip_leading_bot_mentions(text: &str) -> &str {
+    let mut current = text.trim_start();
+    while let Some(rest) = current.strip_prefix("@<bot>") {
+        current = rest.trim_start();
+    }
+    current
 }
 
 fn parse_command(text: &str) -> Option<ControlCommand> {

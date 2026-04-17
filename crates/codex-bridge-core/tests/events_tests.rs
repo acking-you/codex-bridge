@@ -44,10 +44,43 @@ fn group_message_event_extracts_mentions_and_text() {
             assert_eq!(sender_id, 7);
             assert_eq!(message_id, 100);
             assert_eq!(self_id, 99);
-            assert_eq!(text, "hello");
+            assert_eq!(text, "@<bot> hello");
             assert_eq!(sender_name, "unknown");
             assert!(mentions_self);
             assert_eq!(mentions, vec![99]);
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn group_message_event_preserves_other_user_mentions_with_qq() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 42,
+        "user_id": 7,
+        "message_id": 200,
+        "self_id": 99,
+        "raw_message": "@bot ping @bob",
+        "message": [
+            { "type": "at", "data": { "qq": "99", "name": "bot" } },
+            { "type": "text", "data": { "text": " ping " } },
+            { "type": "at", "data": { "qq": "12345", "name": "bob" } }
+        ]
+    });
+
+    let event = NormalizedEvent::try_from(raw).expect("normalize group message");
+    match event {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
+            text,
+            mentions,
+            mentions_self,
+            ..
+        }) => {
+            assert_eq!(text, "@<bot> ping @<QQ:12345>");
+            assert!(mentions_self);
+            assert_eq!(mentions, vec![99, 12345]);
         },
         other => panic!("unexpected event: {other:?}"),
     }

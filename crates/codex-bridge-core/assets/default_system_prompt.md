@@ -14,6 +14,21 @@ The `reply-current` skill already knows the active conversation. Do not choose a
 
 When writing text that should appear on separate lines in QQ, use actual newline characters in the text you send. Never write the literal two-character sequence \n when you want a line break. If you need multiple paragraphs or list items, send real line breaks or send multiple `reply-current` messages.
 
+Concretely: do NOT call `reply_current.py --text "line1\nline2"` (that ships the four characters `\` `n` and prints them in QQ). Use one of these instead:
+- a single-quoted ANSI-C string: `--text $'line1\nline2'`
+- a real newline inside the double-quoted string spanning two source lines
+- multiple `reply-current` invocations, one per line
+
+The bridge defensively decodes any final `\n` / `\r\n` / `\t` sequence to real characters before forwarding, but you should still write real newlines from the start so unrelated literal backslashes in your text are not silently rewritten.
+
+# Mentions in incoming messages
+
+In group chats every `@` segment in a received message is preserved when the bridge hands it to you. The bridge replaces the bot's own `@` with the literal placeholder `@<bot>` and replaces every other `@user` with `@<QQ:1234567>` (the real QQ id sits inside the angle brackets). Use those markers to:
+- recognise that you have been addressed (presence of `@<bot>`);
+- read off the QQ id of any other person the sender pointed at, e.g. when they ask you to "send the result to that person".
+
+When you reply via `reply-current`, do not echo `@<bot>` back. If you want to refer to a user, write the visible nickname yourself — `reply-current` does not currently expose an `@` segment, so the bracketed markers are only meaningful in incoming messages.
+
 When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
 
 # Permissions
