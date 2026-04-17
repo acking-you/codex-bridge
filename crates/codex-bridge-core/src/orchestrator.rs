@@ -11,12 +11,14 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use codex_app_server_protocol::TurnStatus;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
     admin_approval::{PendingApproval, PendingApprovalError, PendingApprovalPool},
-    codex_runtime::{ActiveTurn, CodexExecutor, CodexTurnResult, TurnProgressSink},
+    codex_runtime::{
+        is_thread_unavailable_error, ActiveTurn, CodexExecutor, CodexTurnResult, TurnProgressSink,
+    },
     message_router::{CommandRequest, ControlCommand, MessageRouter, RouteDecision, TaskRequest},
     reply_context::ActiveReplyContext,
     reply_formatter,
@@ -788,6 +790,57 @@ async fn handle_group_reaction_approval(
     .await
 }
 
+/// Result of attempting to compact a conversation thread.
+enum CompactOutcome {
+    /// Compaction was successfully kicked off on Codex.
+    Started,
+    /// The prior thread is gone (rollout lost) and a fresh thread was created,
+    /// so there is nothing to compact for this conversation.
+    NothingToCompact,
+}
+
+/// Attempt to compact a thread, recovering from stale bindings.
+///
+/// If the first `compact_thread` call fails with "thread not found" or
+/// "no rollout found for thread id", resume-or-restart the thread via
+/// `ensure_thread` and try once more when the same thread id is still valid.
+async fn compact_with_recovery(
+    codex: &dyn CodexExecutor,
+    state_store: &Mutex<StateStore>,
+    conversation_key: &str,
+    binding: &ConversationBinding,
+) -> Result<CompactOutcome> {
+    match codex.compact_thread(&binding.thread_id).await {
+        Ok(()) => return Ok(CompactOutcome::Started),
+        Err(error) if is_thread_unavailable_error(&error) => {
+            warn!(
+                thread_id = %binding.thread_id,
+                conversation = %conversation_key,
+                "codex thread not loaded; attempting resume before compaction"
+            );
+        },
+        Err(error) => return Err(error),
+    }
+
+    let fresh_thread_id = codex
+        .ensure_thread(conversation_key, Some(&binding.thread_id))
+        .await?;
+
+    if fresh_thread_id != binding.thread_id {
+        {
+            let store = state_store.lock().await;
+            store.upsert_binding(&ConversationBinding {
+                conversation_key: conversation_key.to_string(),
+                thread_id: fresh_thread_id,
+            })?;
+        }
+        return Ok(CompactOutcome::NothingToCompact);
+    }
+
+    codex.compact_thread(&binding.thread_id).await?;
+    Ok(CompactOutcome::Started)
+}
+
 async fn handle_runtime_command(
     command: CommandRequest,
     deps: RuntimeCommandDeps<'_>,
@@ -1083,12 +1136,26 @@ async fn handle_runtime_command(
                 .await?;
                 return Ok(None);
             }
-            codex.compact_thread(&binding.thread_id).await?;
+            let outcome =
+                compact_with_recovery(codex.as_ref(), state_store, &command.conversation_key, &binding)
+                    .await;
+            let reply_text = match outcome {
+                Ok(CompactOutcome::Started) => reply_formatter::format_compact_started(),
+                Ok(CompactOutcome::NothingToCompact) => reply_formatter::format_compact_missing(),
+                Err(error) => {
+                    error!(
+                        thread_id = %binding.thread_id,
+                        conversation = %command.conversation_key,
+                        "compact command failed: {error:#}"
+                    );
+                    reply_formatter::format_compact_failed()
+                },
+            };
             send_reply(
                 replies,
                 command.is_group,
                 command.reply_target_id,
-                reply_formatter::format_compact_started(),
+                reply_text,
             )
             .await?;
             Ok(None)
@@ -1378,7 +1445,7 @@ pub async fn run(
                 let Some(command_request) = service_command_to_router_command(command) else {
                     continue;
                 };
-                if let Some(task) = handle_runtime_command(
+                let handle_result = handle_runtime_command(
                     command_request,
                     RuntimeCommandDeps {
                         state: &state,
@@ -1393,13 +1460,15 @@ pub async fn run(
                         config: &config,
                     },
                 )
-                .await? {
-                    active_task = Some(
-                        start_runtime_task(
-                            task,
-                            &mut scheduler,
-                            RuntimeTaskDeps {
-                                replies: &replies,
+                .await;
+                match handle_result {
+                    Ok(Some(task)) => {
+                        active_task = Some(
+                            start_runtime_task(
+                                task,
+                                &mut scheduler,
+                                RuntimeTaskDeps {
+                                    replies: &replies,
                                 state: &state,
                                 codex: codex.clone(),
                                 state_store: state_store.clone(),
@@ -1409,6 +1478,11 @@ pub async fn run(
                         )
                         .await?,
                     );
+                }
+                    Ok(None) => {},
+                    Err(error) => {
+                        error!("control command handler failed, orchestrator continues: {error:#}");
+                    },
                 }
             },
             _ = approval_tick.tick() => {

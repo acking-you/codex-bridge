@@ -599,6 +599,16 @@ pub fn is_missing_thread_rollout_error(error: &anyhow::Error) -> bool {
     message.contains("no rollout found for thread id")
 }
 
+/// Return whether an app-server error indicates the target thread is not
+/// currently loaded (either the in-memory handle is gone after a restart, or
+/// the rollout truly no longer exists on disk).
+pub fn is_thread_unavailable_error(error: &anyhow::Error) -> bool {
+    if is_missing_thread_rollout_error(error) {
+        return true;
+    }
+    error.to_string().contains("thread not found")
+}
+
 #[async_trait]
 impl CodexExecutor for CodexRuntime {
     async fn ensure_thread(

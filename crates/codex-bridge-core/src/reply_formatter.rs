@@ -77,6 +77,11 @@ pub fn format_compact_busy() -> String {
     "当前会话正在执行任务；先等它结束，或先 /cancel。".to_string()
 }
 
+/// Return the message shown when compaction failed unexpectedly.
+pub fn format_compact_failed() -> String {
+    "上下文压缩没成功，稍后再试一次，或先 /clear 再重开对话。".to_string()
+}
+
 /// Return the message shown when a waiting task is denied.
 pub fn format_approval_denied() -> String {
     "管理员这次没有点头，所以这条请求我先不执行。".to_string()
