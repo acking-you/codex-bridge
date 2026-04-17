@@ -81,7 +81,7 @@ cargo run -p codex-bridge-cli -- run
 3. 生成或复用 WebUI / WS token
 4. 生成或复用 `system_prompt.md`
 5. 生成或复用 `admin.toml`
-6. 同步隔离态 `CODEX_HOME` 所需的 `config.toml` 和 `auth.json`
+6. 缺失时为隔离态 `CODEX_HOME` 初始化 `config.toml` 和 `auth.json`
 7. patch QQ 的加载入口，使其加载当前仓库构建产物
 8. 前台启动 QQ + NapCat
 9. 启动本地 API 和 Codex runtime
@@ -157,7 +157,7 @@ admin_user_id = 2394626220
 .run/default/codex-home/
 ```
 
-启动时会尝试从你本机的 `CODEX_HOME` 复制：
+启动时如果隔离态目录里还没有对应文件，会尝试从你本机的 `CODEX_HOME` 复制：
 
 - `config.toml`
 - `auth.json`
@@ -265,15 +265,23 @@ python3 skills/reply-current/reply_current.py --text "处理完成了"
 - `/queue`
 - `/cancel`
 - `/retry_last`
+- `/clear`
+- `/compact`
 - `/approve <task_id>`
 - `/deny <task_id>`
 - `/status <task_id>`
 
 其中：
 
-- `/approve`、`/deny`、`/status <task_id>` 只允许 admin 私聊使用
+- `/help` 公开可用
+- admin 可在私聊或群里 `@bot` 使用 `/status`、`/queue`、`/cancel`、`/retry_last`、`/clear`、`/compact`、`/approve`、`/deny`
+- 群里的 non-admin 不能触发这些管理命令
+- 群聊里裸 `/status` 不生效，仍然要求先 `@bot`
+- 群聊待审批任务不能用 `/approve` 放行；只能由管理员对原消息点敬礼表情批准
 - `/cancel` 只能取消自己发起的当前任务
 - `/retry_last` 只能重试自己在当前会话里的最近失败/中断任务
+- `/clear` 只清当前会话到 Codex thread 的绑定，不删任务历史
+- `/compact` 只对当前会话已绑定的 thread 发起真正的 compact 请求；如果当前会话正在运行，则会拒绝
 
 ## 管理员审批流
 
@@ -286,12 +294,10 @@ python3 skills/reply-current/reply_current.py --text "处理完成了"
 
 1. 请求进入 `pending approval` 池
 2. bot 立即回原提问者一条“等待管理员确认”的提示
-3. bot 私聊 admin 一条审批摘要
-4. admin 私聊：
-   - `/approve <task_id>`
-   - `/deny <task_id>`
-   - `/status <task_id>`
-5. 若 `15` 分钟内没人处理，则自动 `Expired`
+3. 如果是 non-admin 群聊请求，bot 会提示“请管理员对原消息点敬礼表情”
+4. bot 仍可私聊 admin 一条摘要，但不再提供群任务的 `/approve`
+5. non-admin 私聊请求仍然沿用 admin 私聊 `/approve <task_id>`、`/deny <task_id>`、`/status <task_id>`
+6. 若 `15` 分钟内没人处理，则自动 `Expired`
 
 待审批任务不会占用现有 Codex 执行队列，只有批准后才会真正入队。
 
