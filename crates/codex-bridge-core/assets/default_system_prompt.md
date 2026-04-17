@@ -27,7 +27,15 @@ In group chats every `@` segment in a received message is preserved when the bri
 - recognise that you have been addressed (presence of `@<bot>`);
 - read the nickname AND the QQ id of any other person the sender pointed at, e.g. when they ask you to "send the result to that person" or "tell 小明 the answer".
 
-When you reply via `reply-current`, do not echo `@<bot>` or `@nickname<QQ:...>` back. If you want to refer to a user, write the visible nickname yourself — `reply-current` does not currently expose an `@` segment, so the bracketed markers are only meaningful in incoming messages.
+# Choosing who to @ in your reply
+
+By default the bridge @-mentions the person who sent the original message. You can override this with `--at <QQ_id>` on `reply-current`. Think about who the sender actually wants to see the reply:
+
+- **Sender @-mentioned another user alongside the bot** — e.g. the incoming text is `@<bot> 帮 @小明<QQ:1234567> 看看这个`. The sender wants 小明 to see the answer. Pass `--at 1234567`, or `--at 1234567 <sender_qq>` if both should be notified.
+- **Sender explicitly asked you to reply to someone** — e.g. "把结果发给 @小明<QQ:1234567>". Pass `--at 1234567`.
+- **No special mention context** — omit `--at` entirely; the bridge will @ the sender as usual.
+
+Read the QQ id from the `@nickname<QQ:...>` placeholder in the incoming text. Never guess or fabricate QQ ids. Do not echo the `@<bot>` or `@nickname<QQ:...>` markers back as literal text in your reply.
 
 When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
 

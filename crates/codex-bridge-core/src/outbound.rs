@@ -18,6 +18,10 @@ pub struct ReplyRequest {
     pub image: Option<PathBuf>,
     /// Generic file to send back.
     pub file: Option<PathBuf>,
+    /// Explicit list of QQ ids to `@` in the group reply. When empty or
+    /// absent the bridge falls back to `@`-ing the original sender.
+    #[serde(default)]
+    pub at: Vec<i64>,
 }
 
 /// Allowed reply payload forms.
@@ -92,13 +96,15 @@ pub struct OutboundMessage {
 }
 
 impl ReplyRequest {
-    /// Convert one API/CLI request into a validated reply payload.
-    pub fn into_payload(self, context: &ActiveReplyContext) -> Result<ReplyPayload> {
+    /// Convert one API/CLI request into a validated reply payload and an
+    /// optional explicit `@` target list.
+    pub fn into_payload(self, context: &ActiveReplyContext) -> Result<(ReplyPayload, Vec<i64>)> {
         let Self {
             token: _,
             text,
             image,
             file,
+            at,
         } = self;
         let variants = usize::from(text.is_some())
             + usize::from(image.is_some())
@@ -112,13 +118,16 @@ impl ReplyRequest {
             if text.is_empty() {
                 bail!("reply text must not be empty");
             }
-            return Ok(ReplyPayload::Text(text));
+            return Ok((ReplyPayload::Text(text), at));
         }
 
         if let Some(path) = image {
-            return Ok(ReplyPayload::Image {
-                path: resolve_artifact_path(&path, context)?,
-            });
+            return Ok((
+                ReplyPayload::Image {
+                    path: resolve_artifact_path(&path, context)?,
+                },
+                at,
+            ));
         }
 
         let path =
@@ -127,17 +136,25 @@ impl ReplyRequest {
             bail!("reply file name is invalid");
         };
         let name = name.to_string();
-        Ok(ReplyPayload::File {
-            path,
-            name,
-        })
+        Ok((
+            ReplyPayload::File {
+                path,
+                name,
+            },
+            at,
+        ))
     }
 }
 
 /// Build a transport-ready outbound message from the active context.
+///
+/// When `at_targets` is non-empty the message `@`-mentions exactly those QQ
+/// ids. When it is empty the bridge falls back to `@`-ing the original
+/// sender (the person who triggered the task).
 pub fn build_outbound_message(
     context: &ActiveReplyContext,
     payload: ReplyPayload,
+    at_targets: &[i64],
 ) -> OutboundMessage {
     let target = if context.is_group {
         OutboundTarget::Group(context.reply_target_id)
@@ -150,9 +167,17 @@ pub fn build_outbound_message(
         segments.push(OutboundSegment::Reply {
             message_id: context.source_message_id,
         });
-        segments.push(OutboundSegment::At {
-            user_id: context.source_sender_id,
-        });
+        if at_targets.is_empty() {
+            segments.push(OutboundSegment::At {
+                user_id: context.source_sender_id,
+            });
+        } else {
+            for &user_id in at_targets {
+                segments.push(OutboundSegment::At {
+                    user_id,
+                });
+            }
+        }
     }
 
     match payload {

@@ -25,10 +25,20 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 - Group messages reach you with mention markers preserved: `@<bot>` is the placeholder for an `@` aimed at the bot itself, and `@nickname<QQ:1234567>` (or `@<QQ:1234567>` when the original at segment carried no name) is the placeholder for an `@` aimed at any other user. Read those markers when relevant; do not echo them back into your reply.
 
 ## Commands
-Send plain text:
+Send plain text (default: @-mentions the original sender):
 
 ```bash
 python3 skills/reply-current/reply_current.py --text "处理完成，结论在这里。"
+```
+
+Send plain text and @-mention specific users instead of the sender:
+
+```bash
+python3 skills/reply-current/reply_current.py --text "这是你要的结果" --at 1234567
+```
+
+```bash
+python3 skills/reply-current/reply_current.py --text "你们看看这个" --at 1234567 7654321
 ```
 
 Send an image artifact:
@@ -42,6 +52,16 @@ Send a file artifact:
 ```bash
 python3 skills/reply-current/reply_current.py --file .run/artifacts/report.md
 ```
+
+## Choosing who to @
+
+By default the bridge @-mentions the person who sent the original message. Use `--at` to override this when the context makes it clear the sender wants someone else to see the reply:
+
+- **Sender @-mentioned another user alongside the bot** — e.g. `@bot 帮 @小明<QQ:1234567> 看看这个`. The sender wants 小明 to see the answer. Pass `--at 1234567` (or `--at 1234567 <sender_qq>` if you also want to @ the sender).
+- **Sender explicitly asked you to reply to someone** — e.g. "把结果发给 @小明<QQ:1234567>". Pass `--at 1234567`.
+- **No special mention context** — omit `--at` entirely; the bridge will @ the sender as usual.
+
+Read the QQ id from the `@nickname<QQ:...>` placeholder in the incoming message text. Do not guess QQ ids.
 
 ## Common Mistakes
 - Do not use `send-private` or `send-group` for normal task results.

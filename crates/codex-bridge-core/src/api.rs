@@ -246,10 +246,10 @@ async fn reply_handler(
         .reply_context(token.as_str())
         .await
         .map_err(|error| bad_request(error.to_string().as_str()))?;
-    let reply_payload = payload
+    let (reply_payload, at_targets) = payload
         .into_payload(&context)
         .map_err(|error| bad_request(error.to_string().as_str()))?;
-    let outbound = build_outbound_message(&context, reply_payload);
+    let outbound = build_outbound_message(&context, reply_payload, &at_targets);
     info!(
         conversation = %context.conversation_key,
         token = %token,

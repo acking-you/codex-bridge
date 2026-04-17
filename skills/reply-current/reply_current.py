@@ -30,6 +30,14 @@ def parse_args() -> argparse.Namespace:
         help="File artifact path under .run/artifacts/.",
     )
     parser.add_argument(
+        "--at",
+        type=int,
+        nargs="+",
+        default=[],
+        help="QQ id(s) to @-mention in the group reply instead of the original sender. "
+             "Pass one or more numeric QQ ids. Ignored for private chats.",
+    )
+    parser.add_argument(
         "--api-bind",
         default="127.0.0.1:36111",
         help="codex-bridge local API bind address.",
@@ -63,6 +71,7 @@ def build_payload(args: argparse.Namespace, context: dict[str, object], root: Pa
         "text": None,
         "image": None,
         "file": None,
+        "at": args.at if args.at else [],
     }
     if args.text is not None:
         payload["text"] = normalize_escape_sequences(args.text)

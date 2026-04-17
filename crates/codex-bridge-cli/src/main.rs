@@ -289,6 +289,7 @@ async fn reply_command(
         text,
         image,
         file,
+        at: vec![],
     };
     post_local_json(config, "/api/reply", serde_json::to_value(payload)?)
         .await
