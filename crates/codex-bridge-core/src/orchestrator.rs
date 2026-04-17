@@ -148,7 +148,7 @@ async fn handle_command(
         ),
         ControlCommand::Queue => scheduler.queue_preview(),
         ControlCommand::Cancel => {
-            let _ = scheduler.cancel_running();
+            let _ = scheduler.cancel_running(&command.conversation_key);
             "当前任务已取消。".to_string()
         },
         ControlCommand::RetryLast => scheduler
@@ -175,7 +175,7 @@ async fn handle_task(
     scheduler: &mut Scheduler,
     state_store: Option<&Mutex<StateStore>>,
 ) -> Result<()> {
-    if scheduler.running().is_some() {
+    if scheduler.running_for(&task.conversation_key).is_some() {
         match scheduler.enqueue(
             task.source_message_id.to_string(),
             task.conversation_key.clone(),
@@ -209,6 +209,7 @@ async fn handle_task(
             return finish_failed_task(
                 replies,
                 scheduler,
+                &task.conversation_key,
                 task.is_group,
                 task.reply_target_id,
                 &error.to_string(),
@@ -249,6 +250,7 @@ async fn handle_task(
             return finish_failed_task(
                 replies,
                 scheduler,
+                &task.conversation_key,
                 task.is_group,
                 task.reply_target_id,
                 &error.to_string(),
@@ -263,7 +265,7 @@ async fn handle_task(
 
     let task_state = map_turn_state(&result.status);
     let summary = summarize_turn_result(&result);
-    scheduler.finish_running(task_state, summary.clone());
+    scheduler.finish_running(&task.conversation_key, task_state, summary.clone());
 
     let final_reply = summary.unwrap_or_else(|| "执行完成。".to_string());
     send_reply(replies, task.is_group, task.reply_target_id, final_reply).await
@@ -319,12 +321,13 @@ async fn resolve_binding(
 async fn finish_failed_task(
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
+    conversation_key: &str,
     is_group: bool,
     reply_target_id: i64,
     error_message: &str,
 ) -> Result<()> {
     let summary = reply_formatter::format_failure(error_message);
-    scheduler.finish_running(TaskState::Failed, Some(summary.clone()));
+    scheduler.finish_running(conversation_key, TaskState::Failed, Some(summary.clone()));
     send_reply(replies, is_group, reply_target_id, summary).await
 }
 
@@ -1241,7 +1244,11 @@ pub async fn run(
                             skill_reply_count,
                             "task finished"
                         );
-                        scheduler.finish_running(outcome.task_state, outcome.summary.clone());
+                        scheduler.finish_running(
+                            &current_task.task.conversation_key,
+                            outcome.task_state,
+                            outcome.summary.clone(),
+                        );
                         if matches!(outcome.task_state, TaskState::Failed | TaskState::Interrupted) {
                             retryable_tasks.insert(
                                 current_task.task.source_message_id.to_string(),
@@ -1279,7 +1286,11 @@ pub async fn run(
                             "task failed before producing terminal outcome"
                         );
                         let message = format!("执行失败。原因：{error}");
-                        scheduler.finish_running(TaskState::Failed, Some(message.clone()));
+                        scheduler.finish_running(
+                            &current_task.task.conversation_key,
+                            TaskState::Failed,
+                            Some(message.clone()),
+                        );
                         retryable_tasks.insert(
                             current_task.task.source_message_id.to_string(),
                             current_task.task.clone(),
@@ -1300,7 +1311,11 @@ pub async fn run(
                             "task join failed"
                         );
                         let message = format!("执行失败。原因：后台任务异常退出：{error}");
-                        scheduler.finish_running(TaskState::Failed, Some(message.clone()));
+                        scheduler.finish_running(
+                            &current_task.task.conversation_key,
+                            TaskState::Failed,
+                            Some(message.clone()),
+                        );
                         retryable_tasks.insert(
                             current_task.task.source_message_id.to_string(),
                             current_task.task.clone(),
