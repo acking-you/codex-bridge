@@ -268,7 +268,12 @@ fn command_approval_declines_extra_permission_requests() {
         reason: None,
         network_approval_context: None,
         command: Some("ls -la".to_string()),
-        cwd: Some(PathBuf::from("/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ")),
+        cwd: Some(
+            AbsolutePathBuf::from_absolute_path(
+                "/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ",
+            )
+            .expect("absolute path"),
+        ),
         command_actions: None,
         additional_permissions: Some(codex_app_server_protocol::AdditionalPermissionProfile {
             network: Some(codex_app_server_protocol::AdditionalNetworkPermissions {
@@ -310,6 +315,9 @@ fn summarize_turn_result_uses_failure_summary_when_no_reply_exists() {
             codex_error_info: None,
             additional_details: None,
         }),
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
     };
 
     assert_eq!(
@@ -325,6 +333,9 @@ fn summarize_turn_result_uses_interrupted_summary_when_needed() {
         items: vec![],
         status: TurnStatus::Interrupted,
         error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
     };
 
     assert_eq!(
@@ -342,6 +353,9 @@ fn describe_server_notification_summarizes_turn_start_and_item_start() {
             items: vec![],
             status: TurnStatus::InProgress,
             error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
         },
     });
     let item_started = ServerNotification::ItemStarted(ItemStartedNotification {

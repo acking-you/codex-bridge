@@ -527,8 +527,8 @@ dependencies = [
  "anyhow",
  "clap",
  "codex-experimental-api-macros",
- "codex-git-utils",
  "codex-protocol",
+ "codex-shell-command",
  "codex-utils-absolute-path",
  "inventory",
  "rmcp",
@@ -536,7 +536,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "shlex",
  "strum_macros",
  "thiserror 2.0.18",
  "tracing",
@@ -617,23 +616,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-git-utils"
-version = "0.0.0"
-dependencies = [
- "codex-utils-absolute-path",
- "futures",
- "once_cell",
- "regex",
- "schemars 0.8.22",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "ts-rs",
- "walkdir",
-]
-
-[[package]]
 name = "codex-network-proxy"
 version = "0.0.0"
 dependencies = [
@@ -670,13 +652,13 @@ dependencies = [
  "chrono",
  "codex-async-utils",
  "codex-execpolicy",
- "codex-git-utils",
  "codex-network-proxy",
  "codex-utils-absolute-path",
  "codex-utils-image",
  "codex-utils-string",
  "codex-utils-template",
  "encoding_rs",
+ "globset",
  "icu_decimal",
  "icu_locale_core",
  "icu_provider",
@@ -699,11 +681,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-shell-command"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "codex-protocol",
+ "codex-utils-absolute-path",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "url",
+ "which",
+]
+
+[[package]]
 name = "codex-utils-absolute-path"
 version = "0.0.0"
 dependencies = [
  "dirs",
- "path-absolutize",
+ "dunce",
  "schemars 0.8.22",
  "serde",
  "ts-rs",
@@ -722,6 +722,7 @@ dependencies = [
 name = "codex-utils-home-dir"
 version = "0.0.0"
 dependencies = [
+ "codex-utils-absolute-path",
  "dirs",
 ]
 
@@ -2712,24 +2713,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
 
 [[package]]
-name = "path-absolutize"
-version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4af381fe79fa195b4909485d99f73a80792331df0625188e707854f0b3383f5"
-dependencies = [
- "path-dedot",
-]
-
-[[package]]
-name = "path-dedot"
-version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ba0ad7e047712414213ff67533e6dd477af0a4e1d14fb52343e53d30ea9397"
-dependencies = [
- "once_cell",
-]
-
-[[package]]
 name = "pem"
 version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3665,15 +3648,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3896,6 +3870,7 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
+ "indexmap 2.13.1",
  "itoa",
  "memchr",
  "serde",
@@ -4172,6 +4147,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
 name = "string_cache"
@@ -4703,6 +4684,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
+dependencies = [
+ "cc",
+ "regex",
+ "regex-syntax 0.8.10",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-bash"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4857,16 +4868,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "walkdir"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
-dependencies = [
- "same-file",
- "winapi-util",
-]
 
 [[package]]
 name = "want"
@@ -5024,6 +5025,15 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "which"
+version = "8.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81995fafaaaf6ae47a7d0cc83c67caf92aeb7e5331650ae6ff856f7c0c60c459"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "widestring"
