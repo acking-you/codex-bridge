@@ -144,13 +144,13 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         pending_approval_capacity: config.pending_approval_capacity,
         approval_timeout_secs: config.approval_timeout_secs,
     };
-    let orchestrator_task = tokio::spawn(async move {
-        if let Err(error) =
-            orchestrator::run(codex_state, control_rx, codex, store, orchestrator_config).await
-        {
-            eprintln!("orchestrator stopped: {error:#}");
-        }
-    });
+    let orchestrator_task = tokio::spawn(orchestrator_supervisor(
+        codex_state,
+        control_rx,
+        codex,
+        store,
+        orchestrator_config,
+    ));
     let launcher_task = launcher::launch_qq_foreground(&prepared, config.api_bind.as_str());
     tokio::pin!(launcher_task);
 
@@ -217,6 +217,62 @@ async fn post_local_json(config: &RuntimeConfig, path: &str, payload: Value) -> 
 
 fn local_url(config: &RuntimeConfig, path: &str) -> String {
     format!("http://{}{}", config.api_bind, path)
+}
+
+async fn orchestrator_supervisor(
+    state: ServiceState,
+    mut control_rx: mpsc::Receiver<codex_bridge_core::service::ServiceCommand>,
+    codex: Arc<dyn codex_bridge_core::codex_runtime::CodexExecutor>,
+    store: Arc<Mutex<StateStore>>,
+    config: orchestrator::OrchestratorConfig,
+) {
+    use std::time::Duration;
+
+    let mut backoff_ms: u64 = 500;
+    const MAX_BACKOFF_MS: u64 = 30_000;
+
+    loop {
+        let (forward_tx, forward_rx) =
+            mpsc::channel::<codex_bridge_core::service::ServiceCommand>(128);
+
+        let forwarder = tokio::spawn(async move {
+            while let Some(cmd) = control_rx.recv().await {
+                if forward_tx.send(cmd).await.is_err() {
+                    break;
+                }
+            }
+            control_rx
+        });
+
+        let result = orchestrator::run(
+            state.clone(),
+            forward_rx,
+            codex.clone(),
+            store.clone(),
+            config.clone(),
+        )
+        .await;
+
+        control_rx = match forwarder.await {
+            Ok(rx) => rx,
+            Err(join_err) => {
+                eprintln!("orchestrator supervisor: forwarder join failed: {join_err:#}");
+                return;
+            },
+        };
+
+        match result {
+            Ok(()) => {
+                eprintln!("orchestrator exited cleanly; supervisor stopping");
+                return;
+            },
+            Err(error) => {
+                eprintln!("orchestrator returned error, restarting in {backoff_ms}ms: {error:#}");
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+            },
+        }
+    }
 }
 
 async fn reply_command(
