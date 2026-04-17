@@ -1720,3 +1720,20 @@ async fn cancel_command_replies_gracefully_when_interrupt_fails() {
     run_handle.abort();
     bridge_handle.abort();
 }
+
+#[tokio::test]
+async fn send_reply_best_effort_swallows_error_with_log() {
+    struct FailingSink;
+    #[async_trait::async_trait]
+    impl codex_bridge_core::orchestrator::ReplySink for FailingSink {
+        async fn send_private(&self, _user_id: i64, _text: String) -> Result<()> {
+            Err(anyhow::anyhow!("transport closed"))
+        }
+        async fn send_group(&self, _group_id: i64, _text: String) -> Result<()> {
+            Err(anyhow::anyhow!("transport closed"))
+        }
+    }
+    // The function returns (), so absence of panic + no `?` == swallowed error.
+    codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, false, 1, "hi".into()).await;
+    codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, true, 2, "hi".into()).await;
+}

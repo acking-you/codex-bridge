@@ -1258,13 +1258,13 @@ pub async fn run(
                                 None
                             }
                         }) {
-                            send_reply(
+                            send_reply_best_effort(
                                 &replies,
                                 current_task.task.is_group,
                                 current_task.task.reply_target_id,
                                 reply_text,
                             )
-                            .await?;
+                            .await;
                         } else {
                             info!(
                                 conversation = %current_task.task.conversation_key,
@@ -1285,13 +1285,13 @@ pub async fn run(
                             current_task.task.clone(),
                         );
                         last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
-                        send_reply(
+                        send_reply_best_effort(
                             &replies,
                             current_task.task.is_group,
                             current_task.task.reply_target_id,
                             message,
                         )
-                        .await?;
+                        .await;
                     },
                     Err(error) => {
                         warn!(
@@ -1306,13 +1306,13 @@ pub async fn run(
                             current_task.task.clone(),
                         );
                         last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
-                        send_reply(
+                        send_reply_best_effort(
                             &replies,
                             current_task.task.is_group,
                             current_task.task.reply_target_id,
                             message,
                         )
-                        .await?;
+                        .await;
                     },
                 }
 
@@ -1416,13 +1416,13 @@ pub async fn run(
                                             sender_id = task.source_sender_id,
                                             "private message rejected by friend gate"
                                         );
-                                        send_reply(
+                                        send_reply_best_effort(
                                             &replies,
                                             false,
                                             task.reply_target_id,
                                             reply_formatter::format_friend_gate(),
                                         )
-                                        .await?;
+                                        .await;
                                     } else if !is_admin_task(&task, config.admin_user_id) {
                                         register_pending_approval(
                                             task,
@@ -1520,13 +1520,13 @@ pub async fn run(
                         let store = state_store.lock().await;
                         store.update_task_status(&pending.task_id, TaskStatus::Expired)?;
                     }
-                    send_reply(
+                    send_reply_best_effort(
                         &replies,
                         pending.task.is_group,
                         pending.task.reply_target_id,
                         reply_formatter::format_approval_expired(),
                     )
-                    .await?;
+                    .await;
                 }
             },
         }
@@ -1636,5 +1636,23 @@ async fn send_reply(
         sink.send_group(target_id, text).await
     } else {
         sink.send_private(target_id, text).await
+    }
+}
+
+/// Best-effort reply sender for non-critical user-visible messages inside the
+/// orchestrator run loop. Failures are logged and swallowed so a transient
+/// transport error cannot terminate the loop.
+pub async fn send_reply_best_effort(
+    sink: &dyn ReplySink,
+    is_group: bool,
+    target_id: i64,
+    text: String,
+) {
+    if let Err(error) = send_reply(sink, is_group, target_id, text).await {
+        error!(
+            is_group,
+            target_id,
+            "reply send failed, continuing: {error:#}"
+        );
     }
 }
