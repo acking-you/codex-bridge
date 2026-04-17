@@ -10,6 +10,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use codex_app_server_protocol::TurnStatus;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -148,7 +149,7 @@ async fn handle_command(
         ),
         ControlCommand::Queue => scheduler.queue_preview(),
         ControlCommand::Cancel => {
-            let _ = scheduler.cancel_running();
+            let _ = scheduler.cancel_running(&command.conversation_key);
             "当前任务已取消。".to_string()
         },
         ControlCommand::RetryLast => scheduler
@@ -175,7 +176,7 @@ async fn handle_task(
     scheduler: &mut Scheduler,
     state_store: Option<&Mutex<StateStore>>,
 ) -> Result<()> {
-    if scheduler.running().is_some() {
+    if scheduler.running_for(&task.conversation_key).is_some() {
         match scheduler.enqueue(
             task.source_message_id.to_string(),
             task.conversation_key.clone(),
@@ -209,6 +210,7 @@ async fn handle_task(
             return finish_failed_task(
                 replies,
                 scheduler,
+                &task.conversation_key,
                 task.is_group,
                 task.reply_target_id,
                 &error.to_string(),
@@ -249,6 +251,7 @@ async fn handle_task(
             return finish_failed_task(
                 replies,
                 scheduler,
+                &task.conversation_key,
                 task.is_group,
                 task.reply_target_id,
                 &error.to_string(),
@@ -263,7 +266,7 @@ async fn handle_task(
 
     let task_state = map_turn_state(&result.status);
     let summary = summarize_turn_result(&result);
-    scheduler.finish_running(task_state, summary.clone());
+    scheduler.finish_running(&task.conversation_key, task_state, summary.clone());
 
     let final_reply = summary.unwrap_or_else(|| "执行完成。".to_string());
     send_reply(replies, task.is_group, task.reply_target_id, final_reply).await
@@ -319,12 +322,13 @@ async fn resolve_binding(
 async fn finish_failed_task(
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
+    conversation_key: &str,
     is_group: bool,
     reply_target_id: i64,
     error_message: &str,
 ) -> Result<()> {
     let summary = reply_formatter::format_failure(error_message);
-    scheduler.finish_running(TaskState::Failed, Some(summary.clone()));
+    scheduler.finish_running(conversation_key, TaskState::Failed, Some(summary.clone()));
     send_reply(replies, is_group, reply_target_id, summary).await
 }
 
@@ -365,7 +369,33 @@ struct TaskExecutionOutcome {
 struct ActiveRuntimeTask {
     task: TaskRequest,
     active_turn: ActiveTurn,
+    /// Reply token issued to this task; the orchestrator uses it to revoke
+    /// the matching reply context once the task finishes.
+    reply_token: String,
+}
+
+/// One in-flight task join future tagged with its conversation key, so the
+/// orchestrator can demux completion events back to the right
+/// `ActiveRuntimeTask` entry.
+type TaggedJoin = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    String,
+                    std::result::Result<Result<TaskExecutionOutcome>, tokio::task::JoinError>,
+                ),
+            > + Send,
+    >,
+>;
+
+fn tag_join(
+    conversation_key: String,
     handle: tokio::task::JoinHandle<Result<TaskExecutionOutcome>>,
+) -> TaggedJoin {
+    Box::pin(async move {
+        let result = handle.await;
+        (conversation_key, result)
+    })
 }
 
 struct RuntimeTaskDeps<'a> {
@@ -380,10 +410,10 @@ struct RuntimeCommandDeps<'a> {
     state: &'a ServiceState,
     replies: &'a dyn ReplySink,
     scheduler: &'a mut Scheduler,
-    pending_tasks: &'a mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &'a mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
     retryable_tasks: &'a mut HashMap<String, TaskRequest>,
     pending_approvals: &'a mut PendingApprovalPool,
-    active_task: Option<&'a ActiveRuntimeTask>,
+    active_tasks: &'a HashMap<String, ActiveRuntimeTask>,
     codex: &'a Arc<dyn CodexExecutor>,
     state_store: &'a Arc<Mutex<StateStore>>,
     config: &'a OrchestratorConfig,
@@ -469,7 +499,7 @@ async fn start_runtime_task(
     scheduler: &mut Scheduler,
     deps: RuntimeTaskDeps<'_>,
     already_promoted: bool,
-) -> Result<ActiveRuntimeTask> {
+) -> Result<(ActiveRuntimeTask, tokio::task::JoinHandle<Result<TaskExecutionOutcome>>)> {
     let RuntimeTaskDeps {
         replies,
         state,
@@ -551,18 +581,21 @@ async fn start_runtime_task(
         persisted_task_id,
         active_turn.clone(),
     ));
-    Ok(ActiveRuntimeTask {
-        task,
-        active_turn,
+    Ok((
+        ActiveRuntimeTask {
+            task,
+            active_turn,
+            reply_token,
+        },
         handle,
-    })
+    ))
 }
 
 async fn enqueue_runtime_task(
     scheduled: ScheduledRuntimeTask,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
 ) -> Result<()> {
     let task = scheduled.task.clone();
     let queue_task_id = scheduled
@@ -582,7 +615,10 @@ async fn enqueue_runtime_task(
                 position,
                 "task enqueued"
             );
-            pending_tasks.push_back(scheduled);
+            pending_tasks
+                .entry(task.conversation_key.clone())
+                .or_default()
+                .push_back(scheduled);
             send_reply(
                 replies,
                 task.is_group,
@@ -739,12 +775,12 @@ async fn approve_pending_task(
     pending: PendingApproval,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
     state_store: &Arc<Mutex<StateStore>>,
-    active_task: Option<&ActiveRuntimeTask>,
+    active_tasks: &HashMap<String, ActiveRuntimeTask>,
 ) -> Result<Option<ScheduledRuntimeTask>> {
     let scheduled = ScheduledRuntimeTask::persisted(pending.task_id.clone(), pending.task.clone());
-    if active_task.is_some() {
+    if active_tasks.contains_key(&pending.task.conversation_key) {
         {
             let store = state_store.lock().await;
             store.update_task_status(&pending.task_id, TaskStatus::Queued)?;
@@ -760,9 +796,9 @@ async fn handle_group_reaction_approval(
     reaction: crate::events::GroupMessageReactionEvent,
     replies: &dyn ReplySink,
     scheduler: &mut Scheduler,
-    pending_tasks: &mut VecDeque<ScheduledRuntimeTask>,
+    pending_tasks: &mut HashMap<String, VecDeque<ScheduledRuntimeTask>>,
     pending_approvals: &mut PendingApprovalPool,
-    active_task: Option<&ActiveRuntimeTask>,
+    active_tasks: &HashMap<String, ActiveRuntimeTask>,
     state_store: &Arc<Mutex<StateStore>>,
     config: &OrchestratorConfig,
 ) -> Result<Option<ScheduledRuntimeTask>> {
@@ -785,7 +821,7 @@ async fn handle_group_reaction_approval(
         scheduler,
         pending_tasks,
         state_store,
-        active_task,
+        active_tasks,
     )
     .await
 }
@@ -841,6 +877,29 @@ async fn compact_with_recovery(
     Ok(CompactOutcome::Started)
 }
 
+/// Attempt to interrupt an active turn and, if Codex has lost track of it,
+/// still return Ok so the scheduler slot is eventually released naturally.
+async fn interrupt_with_recovery(
+    codex: &dyn CodexExecutor,
+    active: &ActiveRuntimeTask,
+) -> Result<()> {
+    match codex
+        .interrupt(&active.active_turn.thread_id, &active.active_turn.turn_id)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if is_thread_unavailable_error(&error) => {
+            warn!(
+                thread_id = %active.active_turn.thread_id,
+                turn_id = %active.active_turn.turn_id,
+                "codex lost turn state before interrupt; dropping scheduler slot"
+            );
+            Ok(())
+        },
+        Err(error) => Err(error),
+    }
+}
+
 async fn handle_runtime_command(
     command: CommandRequest,
     deps: RuntimeCommandDeps<'_>,
@@ -852,7 +911,7 @@ async fn handle_runtime_command(
         pending_tasks,
         retryable_tasks,
         pending_approvals,
-        active_task,
+        active_tasks,
         codex,
         state_store,
         config,
@@ -937,24 +996,29 @@ async fn handle_runtime_command(
                 sender_id = command.source_sender_id,
                 "received cancel command"
             );
-            let text = if let Some(active_task) = active_task {
-                if command.source_sender_id != 0
-                    && command.source_sender_id != active_task.task.source_sender_id
-                {
-                    reply_formatter::format_cancel_denied()
-                } else {
-                    codex
-                        .interrupt(
-                            &active_task.active_turn.thread_id,
-                            &active_task.active_turn.turn_id,
-                        )
-                        .await?;
-                    reply_formatter::format_cancel_requested()
-                }
-            } else {
-                "当前没有正在执行的任务。".to_string()
+            let reply_text = match active_tasks.get(&command.conversation_key) {
+                Some(active) => {
+                    if command.source_sender_id != 0
+                        && command.source_sender_id != active.task.source_sender_id
+                    {
+                        reply_formatter::format_cancel_denied()
+                    } else {
+                        match interrupt_with_recovery(codex.as_ref(), active).await {
+                            Ok(()) => reply_formatter::format_cancel_requested(),
+                            Err(error) => {
+                                error!(
+                                    thread_id = %active.active_turn.thread_id,
+                                    turn_id = %active.active_turn.turn_id,
+                                    "cancel command failed: {error:#}"
+                                );
+                                reply_formatter::format_cancel_failed()
+                            },
+                        }
+                    }
+                },
+                None => "当前没有正在执行的任务。".to_string(),
             };
-            send_reply(replies, command.is_group, command.reply_target_id, text).await?;
+            send_reply(replies, command.is_group, command.reply_target_id, reply_text).await?;
             Ok(None)
         },
         ControlCommand::RetryLast => {
@@ -981,7 +1045,7 @@ async fn handle_runtime_command(
                 return Ok(None);
             };
 
-            if active_task.is_some() {
+            if active_tasks.contains_key(&task.conversation_key) {
                 enqueue_runtime_task(
                     ScheduledRuntimeTask::fresh(task),
                     replies,
@@ -1030,7 +1094,7 @@ async fn handle_runtime_command(
                 scheduler,
                 pending_tasks,
                 state_store,
-                active_task,
+                active_tasks,
             )
             .await? {
                 send_reply(
@@ -1123,10 +1187,7 @@ async fn handle_runtime_command(
                 .await?;
                 return Ok(None);
             };
-            if active_task
-                .map(|task| task.task.conversation_key == command.conversation_key)
-                .unwrap_or(false)
-            {
+            if active_tasks.contains_key(&command.conversation_key) {
                 send_reply(
                     replies,
                     command.is_group,
@@ -1174,11 +1235,12 @@ pub async fn run(
     let mut event_rx = state.subscribe_events();
     let mut router = MessageRouter::new();
     let mut scheduler = Scheduler::new(config.queue_capacity);
-    let mut pending_tasks: VecDeque<ScheduledRuntimeTask> = VecDeque::new();
+    let mut pending_tasks: HashMap<String, VecDeque<ScheduledRuntimeTask>> = HashMap::new();
     let mut pending_approvals = PendingApprovalPool::new(config.pending_approval_capacity);
     let mut retryable_tasks: HashMap<String, TaskRequest> = HashMap::new();
     let mut last_retryable_conversation_key: Option<String> = None;
-    let mut active_task: Option<ActiveRuntimeTask> = None;
+    let mut active_tasks: HashMap<String, ActiveRuntimeTask> = HashMap::new();
+    let mut task_joins: FuturesUnordered<TaggedJoin> = FuturesUnordered::new();
     let mut approval_tick = tokio::time::interval(Duration::from_secs(1));
     let replies = ServiceReplySink {
         state: state.clone(),
@@ -1194,15 +1256,14 @@ pub async fn run(
 
     loop {
         tokio::select! {
-            task_result = async {
-                let active_task = active_task.as_mut()?;
-                let handle = &mut active_task.handle;
-                Some(handle.await)
-            }, if active_task.is_some() => {
-                let current_task = active_task.take().ok_or_else(|| anyhow!("missing active task context"))?;
-                let joined = task_result.ok_or_else(|| anyhow!("missing active task result"))?;
-                let skill_reply_count = state.current_reply_sent_count().await;
-                state.deactivate_reply_context().await?;
+            Some((conv_key, joined)) = task_joins.next(), if !task_joins.is_empty() => {
+                let current_task = active_tasks
+                    .remove(&conv_key)
+                    .ok_or_else(|| anyhow!("missing active task context for {conv_key}"))?;
+                let skill_reply_count = state.reply_sent_count(&current_task.reply_token).await;
+                state
+                    .deactivate_reply_context(&current_task.reply_token)
+                    .await?;
 
                 match joined {
                     Ok(Ok(outcome)) => {
@@ -1213,7 +1274,11 @@ pub async fn run(
                             skill_reply_count,
                             "task finished"
                         );
-                        scheduler.finish_running(outcome.task_state, outcome.summary.clone());
+                        scheduler.finish_running(
+                            &current_task.task.conversation_key,
+                            outcome.task_state,
+                            outcome.summary.clone(),
+                        );
                         if matches!(outcome.task_state, TaskState::Failed | TaskState::Interrupted) {
                             retryable_tasks.insert(
                                 current_task.task.source_message_id.to_string(),
@@ -1230,13 +1295,13 @@ pub async fn run(
                                 None
                             }
                         }) {
-                            send_reply(
+                            send_reply_best_effort(
                                 &replies,
                                 current_task.task.is_group,
                                 current_task.task.reply_target_id,
                                 reply_text,
                             )
-                            .await?;
+                            .await;
                         } else {
                             info!(
                                 conversation = %current_task.task.conversation_key,
@@ -1251,19 +1316,23 @@ pub async fn run(
                             "task failed before producing terminal outcome"
                         );
                         let message = format!("执行失败。原因：{error}");
-                        scheduler.finish_running(TaskState::Failed, Some(message.clone()));
+                        scheduler.finish_running(
+                            &current_task.task.conversation_key,
+                            TaskState::Failed,
+                            Some(message.clone()),
+                        );
                         retryable_tasks.insert(
                             current_task.task.source_message_id.to_string(),
                             current_task.task.clone(),
                         );
                         last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
-                        send_reply(
+                        send_reply_best_effort(
                             &replies,
                             current_task.task.is_group,
                             current_task.task.reply_target_id,
                             message,
                         )
-                        .await?;
+                        .await;
                     },
                     Err(error) => {
                         warn!(
@@ -1272,41 +1341,55 @@ pub async fn run(
                             "task join failed"
                         );
                         let message = format!("执行失败。原因：后台任务异常退出：{error}");
-                        scheduler.finish_running(TaskState::Failed, Some(message.clone()));
+                        scheduler.finish_running(
+                            &current_task.task.conversation_key,
+                            TaskState::Failed,
+                            Some(message.clone()),
+                        );
                         retryable_tasks.insert(
                             current_task.task.source_message_id.to_string(),
                             current_task.task.clone(),
                         );
                         last_retryable_conversation_key = Some(current_task.task.conversation_key.clone());
-                        send_reply(
+                        send_reply_best_effort(
                             &replies,
                             current_task.task.is_group,
                             current_task.task.reply_target_id,
                             message,
                         )
-                        .await?;
+                        .await;
                     },
                 }
 
-                if scheduler.running().is_some() {
-                    let Some(next_task) = pending_tasks.pop_front() else {
-                        return Err(anyhow!("scheduler promoted queued task without pending payload"));
-                    };
-                    active_task = Some(
-                        start_runtime_task(
-                            next_task,
-                            &mut scheduler,
-                            RuntimeTaskDeps {
-                                replies: &replies,
-                                state: &state,
-                                codex: codex.clone(),
-                                state_store: state_store.clone(),
-                                config: &config,
-                            },
-                            true,
-                        )
-                        .await?,
-                    );
+                if scheduler.running_for(&conv_key).is_some() {
+                    let next_task = pending_tasks
+                        .get_mut(&conv_key)
+                        .and_then(|list| list.pop_front())
+                        .ok_or_else(|| {
+                            anyhow!("scheduler promoted queued task without pending payload")
+                        })?;
+                    if pending_tasks
+                        .get(&conv_key)
+                        .is_some_and(|list| list.is_empty())
+                    {
+                        pending_tasks.remove(&conv_key);
+                    }
+                    let (active, handle) = start_runtime_task(
+                        next_task,
+                        &mut scheduler,
+                        RuntimeTaskDeps {
+                            replies: &replies,
+                            state: &state,
+                            codex: codex.clone(),
+                            state_store: state_store.clone(),
+                            config: &config,
+                        },
+                        true,
+                    )
+                    .await?;
+                    let key = active.task.conversation_key.clone();
+                    task_joins.push(tag_join(key.clone(), handle));
+                    active_tasks.insert(key, active);
                 }
             },
             event = event_rx.recv() => {
@@ -1319,26 +1402,27 @@ pub async fn run(
                                 &mut scheduler,
                                 &mut pending_tasks,
                                 &mut pending_approvals,
-                                active_task.as_ref(),
+                                &active_tasks,
                                 &state_store,
                                 &config,
                             )
                             .await? {
-                                active_task = Some(
-                                    start_runtime_task(
-                                        task,
-                                        &mut scheduler,
-                                        RuntimeTaskDeps {
-                                            replies: &replies,
-                                            state: &state,
-                                            codex: codex.clone(),
-                                            state_store: state_store.clone(),
-                                            config: &config,
-                                        },
-                                        false,
-                                    )
-                                    .await?,
-                                );
+                                let (active, handle) = start_runtime_task(
+                                    task,
+                                    &mut scheduler,
+                                    RuntimeTaskDeps {
+                                        replies: &replies,
+                                        state: &state,
+                                        codex: codex.clone(),
+                                        state_store: state_store.clone(),
+                                        config: &config,
+                                    },
+                                    false,
+                                )
+                                .await?;
+                                let key = active.task.conversation_key.clone();
+                                task_joins.push(tag_join(key.clone(), handle));
+                                active_tasks.insert(key, active);
                             }
                             continue;
                         }
@@ -1354,28 +1438,29 @@ pub async fn run(
                                             pending_tasks: &mut pending_tasks,
                                             retryable_tasks: &mut retryable_tasks,
                                             pending_approvals: &mut pending_approvals,
-                                            active_task: active_task.as_ref(),
+                                            active_tasks: &active_tasks,
                                             codex: &codex,
                                             state_store: &state_store,
                                             config: &config,
                                         },
                                     )
                                     .await? {
-                                        active_task = Some(
-                                            start_runtime_task(
-                                                task,
-                                                &mut scheduler,
-                                                RuntimeTaskDeps {
-                                                    replies: &replies,
-                                                    state: &state,
-                                                    codex: codex.clone(),
-                                                    state_store: state_store.clone(),
-                                                    config: &config,
-                                                },
-                                                false,
-                                            )
-                                            .await?,
-                                        );
+                                        let (active, handle) = start_runtime_task(
+                                            task,
+                                            &mut scheduler,
+                                            RuntimeTaskDeps {
+                                                replies: &replies,
+                                                state: &state,
+                                                codex: codex.clone(),
+                                                state_store: state_store.clone(),
+                                                config: &config,
+                                            },
+                                            false,
+                                        )
+                                        .await?;
+                                        let key = active.task.conversation_key.clone();
+                                        task_joins.push(tag_join(key.clone(), handle));
+                                        active_tasks.insert(key, active);
                                     }
                                 },
                                 RouteDecision::Task(task) => {
@@ -1388,13 +1473,13 @@ pub async fn run(
                                             sender_id = task.source_sender_id,
                                             "private message rejected by friend gate"
                                         );
-                                        send_reply(
+                                        send_reply_best_effort(
                                             &replies,
                                             false,
                                             task.reply_target_id,
                                             reply_formatter::format_friend_gate(),
                                         )
-                                        .await?;
+                                        .await;
                                     } else if !is_admin_task(&task, config.admin_user_id) {
                                         register_pending_approval(
                                             task,
@@ -1405,7 +1490,7 @@ pub async fn run(
                                             config.admin_user_id,
                                         )
                                         .await?;
-                                    } else if active_task.is_some() {
+                                    } else if active_tasks.contains_key(&task.conversation_key) {
                                         enqueue_runtime_task(
                                             ScheduledRuntimeTask::fresh(task),
                                             &replies,
@@ -1414,21 +1499,22 @@ pub async fn run(
                                         )
                                         .await?;
                                     } else {
-                                        active_task = Some(
-                                            start_runtime_task(
-                                                ScheduledRuntimeTask::fresh(task),
-                                                &mut scheduler,
-                                                RuntimeTaskDeps {
-                                                    replies: &replies,
-                                                    state: &state,
-                                                    codex: codex.clone(),
-                                                    state_store: state_store.clone(),
-                                                    config: &config,
-                                                },
-                                                false,
-                                            )
-                                            .await?,
-                                        );
+                                        let (active, handle) = start_runtime_task(
+                                            ScheduledRuntimeTask::fresh(task),
+                                            &mut scheduler,
+                                            RuntimeTaskDeps {
+                                                replies: &replies,
+                                                state: &state,
+                                                codex: codex.clone(),
+                                                state_store: state_store.clone(),
+                                                config: &config,
+                                            },
+                                            false,
+                                        )
+                                        .await?;
+                                        let key = active.task.conversation_key.clone();
+                                        task_joins.push(tag_join(key.clone(), handle));
+                                        active_tasks.insert(key, active);
                                     }
                                 },
                             }
@@ -1454,7 +1540,7 @@ pub async fn run(
                         pending_tasks: &mut pending_tasks,
                         retryable_tasks: &mut retryable_tasks,
                         pending_approvals: &mut pending_approvals,
-                        active_task: active_task.as_ref(),
+                        active_tasks: &active_tasks,
                         codex: &codex,
                         state_store: &state_store,
                         config: &config,
@@ -1463,12 +1549,11 @@ pub async fn run(
                 .await;
                 match handle_result {
                     Ok(Some(task)) => {
-                        active_task = Some(
-                            start_runtime_task(
-                                task,
-                                &mut scheduler,
-                                RuntimeTaskDeps {
-                                    replies: &replies,
+                        let (active, handle) = start_runtime_task(
+                            task,
+                            &mut scheduler,
+                            RuntimeTaskDeps {
+                                replies: &replies,
                                 state: &state,
                                 codex: codex.clone(),
                                 state_store: state_store.clone(),
@@ -1476,9 +1561,11 @@ pub async fn run(
                             },
                             false,
                         )
-                        .await?,
-                    );
-                }
+                        .await?;
+                        let key = active.task.conversation_key.clone();
+                        task_joins.push(tag_join(key.clone(), handle));
+                        active_tasks.insert(key, active);
+                    },
                     Ok(None) => {},
                     Err(error) => {
                         error!("control command handler failed, orchestrator continues: {error:#}");
@@ -1492,13 +1579,13 @@ pub async fn run(
                         let store = state_store.lock().await;
                         store.update_task_status(&pending.task_id, TaskStatus::Expired)?;
                     }
-                    send_reply(
+                    send_reply_best_effort(
                         &replies,
                         pending.task.is_group,
                         pending.task.reply_target_id,
                         reply_formatter::format_approval_expired(),
                     )
-                    .await?;
+                    .await;
                 }
             },
         }
@@ -1608,5 +1695,23 @@ async fn send_reply(
         sink.send_group(target_id, text).await
     } else {
         sink.send_private(target_id, text).await
+    }
+}
+
+/// Best-effort reply sender for non-critical user-visible messages inside the
+/// orchestrator run loop. Failures are logged and swallowed so a transient
+/// transport error cannot terminate the loop.
+pub async fn send_reply_best_effort(
+    sink: &dyn ReplySink,
+    is_group: bool,
+    target_id: i64,
+    text: String,
+) {
+    if let Err(error) = send_reply(sink, is_group, target_id, text).await {
+        error!(
+            is_group,
+            target_id,
+            "reply send failed, continuing: {error:#}"
+        );
     }
 }

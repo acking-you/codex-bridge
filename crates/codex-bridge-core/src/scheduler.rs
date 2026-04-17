@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 /// Task lifecycle state persisted by the in-memory scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,14 +41,16 @@ pub enum TaskQueueError {
     QueueFull,
 }
 
-/// Single running-task scheduler with bounded waiting queue.
+/// Per-conversation scheduler: each conversation_key may have at most one
+/// running task and keeps its own FIFO wait list. Queue capacity is enforced
+/// across the union of all per-conversation wait lists.
 pub struct Scheduler {
-    /// Maximum number of waiting tasks in the queue.
+    /// Total capacity of waiting tasks summed across all conversations.
     queue_capacity: usize,
-    /// Currently running task.
-    running: Option<TaskSummary>,
-    /// FIFO queue of waiting tasks.
-    queued: VecDeque<TaskSummary>,
+    /// Running tasks keyed by conversation_key.
+    running: HashMap<String, TaskSummary>,
+    /// Per-conversation FIFO wait lists.
+    queued: HashMap<String, VecDeque<TaskSummary>>,
     /// Recent terminal task history, newest at end.
     last_terminal: VecDeque<TaskSummary>,
 }
@@ -61,13 +63,13 @@ impl Scheduler {
     pub fn new(queue_capacity: usize) -> Self {
         Self {
             queue_capacity,
-            running: None,
-            queued: VecDeque::new(),
+            running: HashMap::new(),
+            queued: HashMap::new(),
             last_terminal: VecDeque::new(),
         }
     }
 
-    /// Set the scheduler into running state for the given task.
+    /// Start a task as running for its conversation.
     pub fn start_task(
         &mut self,
         task_id: &str,
@@ -75,19 +77,26 @@ impl Scheduler {
         owner_sender_id: i64,
         source_message_id: i64,
     ) -> Result<(), TaskQueueError> {
-        assert!(self.running.is_none(), "attempted to start a task while another task was running");
-        self.running = Some(TaskSummary {
-            task_id: task_id.to_string(),
-            conversation_key: conversation_key.to_string(),
-            owner_sender_id,
-            source_message_id,
-            state: TaskState::Running,
-            summary: None,
-        });
+        assert!(
+            !self.running.contains_key(conversation_key),
+            "attempted to start a second concurrent task on conversation {conversation_key}"
+        );
+        self.running.insert(
+            conversation_key.to_string(),
+            TaskSummary {
+                task_id: task_id.to_string(),
+                conversation_key: conversation_key.to_string(),
+                owner_sender_id,
+                source_message_id,
+                state: TaskState::Running,
+                summary: None,
+            },
+        );
         Ok(())
     }
 
-    /// Enqueue a task and return the new queue length, or error if full.
+    /// Enqueue a task onto its conversation's wait list and return the new
+    /// length of that list, or an error if the global capacity is exhausted.
     pub fn enqueue(
         &mut self,
         task_id: String,
@@ -95,11 +104,12 @@ impl Scheduler {
         owner_sender_id: i64,
         source_message_id: i64,
     ) -> Result<usize, TaskQueueError> {
-        if self.queued.len() >= self.queue_capacity {
+        if self.queue_len() >= self.queue_capacity {
             return Err(TaskQueueError::QueueFull);
         }
 
-        self.queued.push_back(TaskSummary {
+        let list = self.queued.entry(conversation_key.clone()).or_default();
+        list.push_back(TaskSummary {
             task_id,
             conversation_key,
             owner_sender_id,
@@ -107,12 +117,17 @@ impl Scheduler {
             state: TaskState::Queued,
             summary: None,
         });
-        Ok(self.queued.len())
+        Ok(list.len())
     }
 
-    /// Finish current running task and promote the next queued task if present.
+    /// Mark the running task for a conversation as terminal and promote the
+    /// next queued task for the same conversation, if any.
+    ///
+    /// Returns the summary of the finished task. Panics if there is no
+    /// running task for the conversation.
     pub fn finish_running(
         &mut self,
+        conversation_key: &str,
         state: TaskState,
         summary: Option<String>,
     ) -> Option<TaskSummary> {
@@ -120,16 +135,24 @@ impl Scheduler {
             Self::is_terminal_state(state),
             "attempted to finish with non-terminal state: {state:?}"
         );
-        let mut finished = self.running.take()?;
+        let mut finished = self.running.remove(conversation_key)?;
         finished.state = state;
         finished.summary = summary;
         self.push_terminal(finished.clone());
 
-        if let Some(next) = self.queued.pop_front() {
-            self.running = Some(TaskSummary {
-                state: TaskState::Running,
-                ..next
-            });
+        if let Some(list) = self.queued.get_mut(conversation_key) {
+            if let Some(next) = list.pop_front() {
+                self.running.insert(
+                    conversation_key.to_string(),
+                    TaskSummary {
+                        state: TaskState::Running,
+                        ..next
+                    },
+                );
+            }
+            if list.is_empty() {
+                self.queued.remove(conversation_key);
+            }
         }
 
         Some(finished)
@@ -161,7 +184,7 @@ impl Scheduler {
     }
 
     /// Return the latest terminal task candidate for retry in the same
-    /// conversation.
+    /// conversation, filtered by owner.
     pub fn retry_candidate(
         &self,
         conversation_key: &str,
@@ -193,14 +216,29 @@ impl Scheduler {
         })
     }
 
-    /// Current running task, if any.
-    pub fn running(&self) -> Option<&TaskSummary> {
-        self.running.as_ref()
+    /// Return the running task for a specific conversation.
+    pub fn running_for(&self, conversation_key: &str) -> Option<&TaskSummary> {
+        self.running.get(conversation_key)
     }
 
-    /// Number of waiting tasks.
+    /// Return one representative running task (an arbitrary one, for legacy
+    /// single-running-slot views). Returns the lexicographically first
+    /// conversation's running task so the value is stable across calls.
+    pub fn running(&self) -> Option<&TaskSummary> {
+        self.running
+            .iter()
+            .min_by_key(|(key, _)| key.as_str())
+            .map(|(_, summary)| summary)
+    }
+
+    /// Return all currently running tasks.
+    pub fn running_all(&self) -> Vec<&TaskSummary> {
+        self.running.values().collect()
+    }
+
+    /// Total number of queued tasks across all conversations.
     pub fn queue_len(&self) -> usize {
-        self.queued.len()
+        self.queued.values().map(|list| list.len()).sum()
     }
 
     /// Most recent terminal task snapshot.
@@ -208,25 +246,37 @@ impl Scheduler {
         self.last_terminal.back()
     }
 
-    /// Human-readable preview of queued tasks.
+    /// Human-readable preview of queued tasks, grouped by conversation.
     pub fn queue_preview(&self) -> String {
-        if self.queued.is_empty() {
+        if self.queue_len() == 0 {
             return "队列为空。".to_string();
         }
 
-        self.queued
-            .iter()
-            .enumerate()
-            .map(|(index, task)| {
-                format!("{}. {} ({})", index + 1, task.task_id, task.conversation_key)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut lines = Vec::new();
+        let mut keys: Vec<&String> = self.queued.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(list) = self.queued.get(key) {
+                if list.is_empty() {
+                    continue;
+                }
+                lines.push(format!("[{key}]"));
+                for (index, task) in list.iter().enumerate() {
+                    lines.push(format!("  {}. {}", index + 1, task.task_id));
+                }
+            }
+        }
+        lines.join("\n")
     }
 
-    /// Mark the running task as canceled and promote the next queued task.
-    pub fn cancel_running(&mut self) -> Option<TaskSummary> {
-        self.finish_running(TaskState::Canceled, Some("用户取消".to_string()))
+    /// Mark the running task of one conversation as canceled and promote its
+    /// next queued task, if any.
+    pub fn cancel_running(&mut self, conversation_key: &str) -> Option<TaskSummary> {
+        self.finish_running(
+            conversation_key,
+            TaskState::Canceled,
+            Some("用户取消".to_string()),
+        )
     }
 
     fn is_terminal_state(state: TaskState) -> bool {
@@ -264,5 +314,74 @@ mod tests {
         }
 
         assert_eq!(scheduler.last_terminal.len(), Scheduler::DEFAULT_TERMINAL_HISTORY_CAPACITY);
+    }
+
+    #[test]
+    fn distinct_conversations_can_run_concurrently() {
+        let mut scheduler = Scheduler::new(8);
+        scheduler
+            .start_task("a1", "private:1", 1, 100)
+            .expect("start a1");
+        scheduler
+            .start_task("b1", "group:2", 2, 200)
+            .expect("start b1");
+        assert_eq!(scheduler.running_all().len(), 2);
+        assert_eq!(scheduler.queue_len(), 0);
+        assert!(scheduler.running_for("private:1").is_some());
+        assert!(scheduler.running_for("group:2").is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "second concurrent task")]
+    fn same_conversation_rejects_parallel_start() {
+        let mut scheduler = Scheduler::new(8);
+        scheduler
+            .start_task("a1", "private:1", 1, 100)
+            .expect("start a1");
+        let _ = scheduler.start_task("a2", "private:1", 1, 101);
+    }
+
+    #[test]
+    fn queue_respects_global_capacity() {
+        let mut scheduler = Scheduler::new(1);
+        scheduler
+            .enqueue("a1".to_string(), "private:1".to_string(), 1, 100)
+            .expect("enqueue a1");
+        let err = scheduler
+            .enqueue("a2".to_string(), "group:2".to_string(), 2, 200)
+            .unwrap_err();
+        assert_eq!(err, TaskQueueError::QueueFull);
+    }
+
+    #[test]
+    fn finish_promotes_same_conversation_next() {
+        let mut scheduler = Scheduler::new(8);
+        scheduler
+            .start_task("a1", "private:1", 1, 100)
+            .expect("start a1");
+        scheduler
+            .enqueue("a2".to_string(), "private:1".to_string(), 1, 101)
+            .expect("enqueue a2");
+        let finished = scheduler
+            .finish_running("private:1", TaskState::Completed, None)
+            .expect("finish a1");
+        assert_eq!(finished.task_id, "a1");
+        let running = scheduler.running_for("private:1").expect("a2 promoted");
+        assert_eq!(running.task_id, "a2");
+        assert_eq!(scheduler.queue_len(), 0);
+    }
+
+    #[test]
+    fn cancel_respects_conversation_scope() {
+        let mut scheduler = Scheduler::new(8);
+        scheduler
+            .start_task("a1", "private:1", 1, 100)
+            .expect("start a1");
+        scheduler
+            .start_task("b1", "group:2", 2, 200)
+            .expect("start b1");
+        scheduler.cancel_running("private:1");
+        assert!(scheduler.running_for("private:1").is_none());
+        assert!(scheduler.running_for("group:2").is_some());
     }
 }

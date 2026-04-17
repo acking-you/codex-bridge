@@ -1,6 +1,7 @@
 //! Active reply-context registry for skill-driven QQ replies.
 
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -8,7 +9,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Active reply context for the single running task.
+/// Active reply context for a single running task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveReplyContext {
     /// One-time token bound to the current running task.
@@ -31,11 +32,17 @@ pub struct ActiveReplyContext {
     pub artifacts_dir: PathBuf,
 }
 
-/// Registry for the single active reply context.
+/// Registry holding zero or more concurrently active reply contexts. The
+/// on-disk mirror file always shows the most recently activated context so
+/// legacy skills that read the singleton path keep working when only one
+/// task is in flight.
 #[derive(Debug)]
 pub struct ReplyRegistry {
     context_file: PathBuf,
-    active: Option<ActiveReplyState>,
+    /// Active reply states keyed by their unique token.
+    active: HashMap<String, ActiveReplyState>,
+    /// Token of the context that is currently mirrored to the singleton file.
+    mirrored_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,58 +56,63 @@ impl ReplyRegistry {
     pub fn new(context_file: PathBuf) -> Self {
         Self {
             context_file,
-            active: None,
+            active: HashMap::new(),
+            mirrored_token: None,
         }
     }
 
-    /// Activate a new reply context and mirror it to disk.
+    /// Activate a new reply context (allowing multiple to coexist) and
+    /// mirror it as the most recently activated one to disk.
     pub fn activate(&mut self, context: ActiveReplyContext) -> Result<()> {
-        self.active = Some(ActiveReplyState {
-            context,
-            send_count: 0,
-        });
+        let token = context.token.clone();
+        self.active.insert(
+            token.clone(),
+            ActiveReplyState {
+                context,
+                send_count: 0,
+            },
+        );
+        self.mirrored_token = Some(token);
         self.persist()
     }
 
-    /// Resolve the currently active reply token.
+    /// Resolve a reply token into its currently active context.
     pub fn resolve(&self, token: &str) -> Result<ActiveReplyContext> {
-        let Some(state) = &self.active else {
-            bail!("reply token is not active");
-        };
-        if state.context.token != token {
-            bail!("reply token is not active");
+        match self.active.get(token) {
+            Some(state) => Ok(state.context.clone()),
+            None => bail!("reply token is not active"),
         }
-        Ok(state.context.clone())
     }
 
-    /// Return the currently active reply context, if present.
+    /// Return the most recently activated context, if any.
     pub fn current(&self) -> Option<ActiveReplyContext> {
-        self.active.as_ref().map(|state| state.context.clone())
+        self.mirrored_token
+            .as_ref()
+            .and_then(|token| self.active.get(token))
+            .map(|state| state.context.clone())
     }
 
-    /// Mark one successful skill-driven reply send.
+    /// Mark one successful skill-driven reply send against the given token.
     pub fn mark_sent(&mut self, token: &str) -> Result<usize> {
-        let Some(state) = self.active.as_mut() else {
+        let Some(state) = self.active.get_mut(token) else {
             bail!("reply token is not active");
         };
-        if state.context.token != token {
-            bail!("reply token is not active");
-        }
         state.send_count += 1;
         Ok(state.send_count)
     }
 
-    /// Return how many successful reply sends happened for the active task.
-    pub fn current_send_count(&self) -> usize {
-        self.active
-            .as_ref()
-            .map(|state| state.send_count)
-            .unwrap_or(0)
+    /// Return how many successful reply sends happened for the given token.
+    pub fn send_count_for(&self, token: &str) -> usize {
+        self.active.get(token).map(|state| state.send_count).unwrap_or(0)
     }
 
-    /// Revoke the active reply context and remove the on-disk mirror.
-    pub fn deactivate(&mut self) -> Result<()> {
-        self.active = None;
+    /// Revoke a single reply context by token. The mirror file is updated to
+    /// point at any other still-active context, or removed when none remain.
+    pub fn deactivate(&mut self, token: &str) -> Result<()> {
+        self.active.remove(token);
+        if self.mirrored_token.as_deref() == Some(token) {
+            self.mirrored_token = self.active.keys().next().cloned();
+        }
         self.persist()
     }
 
@@ -110,7 +122,12 @@ impl ReplyRegistry {
                 .with_context(|| format!("create reply context directory {}", parent.display()))?;
         }
 
-        match &self.active {
+        let mirrored = self
+            .mirrored_token
+            .as_ref()
+            .and_then(|token| self.active.get(token));
+
+        match mirrored {
             Some(state) => {
                 let payload =
                     serde_json::to_vec_pretty(&state.context).context("serialize reply context")?;
