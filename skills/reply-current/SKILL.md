@@ -22,7 +22,7 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 - Attachments must already exist under `.run/artifacts/`.
 - Prefer text for short answers, image for visual output, and file for markdown/report artifacts.
 - If you want line breaks in QQ, put real newline characters in `--text`. The plain `"..."` form in bash does NOT turn `\n` into a newline; use `$'line1\nline2'` (ANSI-C quoting), or split a `"..."` string across two source lines, or call this skill once per line. The bridge defensively decodes a stray `\n`/`\r\n`/`\t` if one slips through, but writing real newlines is cleaner.
-- Group messages reach you with mention markers preserved: `@<bot>` is the placeholder for an `@` aimed at the bot itself, and `@<QQ:1234567>` is the placeholder for an `@` aimed at any other user. Read those markers when relevant; do not echo them back into your reply.
+- Group messages reach you with mention markers preserved: `@<bot>` is the placeholder for an `@` aimed at the bot itself, and `@nickname<QQ:1234567>` (or `@<QQ:1234567>` when the original at segment carried no name) is the placeholder for an `@` aimed at any other user. Read those markers when relevant; do not echo them back into your reply.
 
 ## Commands
 Send plain text:

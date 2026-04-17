@@ -23,11 +23,11 @@ The bridge defensively decodes any final `\n` / `\r\n` / `\t` sequence to real c
 
 # Mentions in incoming messages
 
-In group chats every `@` segment in a received message is preserved when the bridge hands it to you. The bridge replaces the bot's own `@` with the literal placeholder `@<bot>` and replaces every other `@user` with `@<QQ:1234567>` (the real QQ id sits inside the angle brackets). Use those markers to:
+In group chats every `@` segment in a received message is preserved when the bridge hands it to you. The bridge replaces the bot's own `@` with the literal placeholder `@<bot>` and replaces every other `@user` with `@nickname<QQ:1234567>` (the displayed nickname is left readable, the real QQ id sits inside the angle brackets). When the underlying `at` segment carries no name the placeholder degrades to `@<QQ:1234567>`. Use these markers to:
 - recognise that you have been addressed (presence of `@<bot>`);
-- read off the QQ id of any other person the sender pointed at, e.g. when they ask you to "send the result to that person".
+- read the nickname AND the QQ id of any other person the sender pointed at, e.g. when they ask you to "send the result to that person" or "tell 小明 the answer".
 
-When you reply via `reply-current`, do not echo `@<bot>` back. If you want to refer to a user, write the visible nickname yourself — `reply-current` does not currently expose an `@` segment, so the bracketed markers are only meaningful in incoming messages.
+When you reply via `reply-current`, do not echo `@<bot>` or `@nickname<QQ:...>` back. If you want to refer to a user, write the visible nickname yourself — `reply-current` does not currently expose an `@` segment, so the bracketed markers are only meaningful in incoming messages.
 
 When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
 

@@ -247,8 +247,9 @@ fn extract_sender_name(value: &Value) -> String {
 /// - `@bot` (the bot's own self_id) becomes the literal placeholder
 ///   `@<bot>` so the agent can recognise that it is being addressed without
 ///   leaking its raw QQ id.
-/// - Any other `@user` becomes `@<QQ:1234>` so the agent can read the
-///   underlying QQ identifier and pass it through to follow-up actions.
+/// - Any other `@user` becomes `@nickname<QQ:1234>` when the OneBot `at`
+///   segment carries a `name` so the agent sees both the displayed name and
+///   the underlying QQ id, or `@<QQ:1234>` when no name was supplied.
 /// - Unknown segment types are dropped.
 fn extract_text(value: &Value, self_id: i64) -> String {
     if let Some(segments) = value.get("message").and_then(Value::as_array) {
@@ -266,14 +267,22 @@ fn extract_text(value: &Value, self_id: i64) -> String {
                     }
                 },
                 Some("at") => {
-                    let qq = segment
-                        .get("data")
+                    let data = segment.get("data");
+                    let qq = data
                         .and_then(|data| data.get("qq"))
                         .and_then(Value::as_str)
                         .and_then(|raw| raw.parse::<i64>().ok());
+                    let name = data
+                        .and_then(|data| data.get("name"))
+                        .and_then(Value::as_str)
+                        .map(sanitize_at_name)
+                        .filter(|name| !name.is_empty());
                     match qq {
                         Some(id) if id == self_id => buf.push_str("@<bot>"),
-                        Some(id) => buf.push_str(&format!("@<QQ:{id}>")),
+                        Some(id) => match name {
+                            Some(name) => buf.push_str(&format!("@{name}<QQ:{id}>")),
+                            None => buf.push_str(&format!("@<QQ:{id}>")),
+                        },
                         None => {},
                     }
                 },
@@ -287,4 +296,11 @@ fn extract_text(value: &Value, self_id: i64) -> String {
         return String::new();
     };
     raw_message.trim().to_string()
+}
+
+/// Strip characters that would confuse the `@nickname<QQ:...>` placeholder
+/// parser (the angle brackets that delimit the metadata block) and trim any
+/// surrounding whitespace.
+fn sanitize_at_name(name: &str) -> String {
+    name.replace(['<', '>'], "_").trim().to_string()
 }
