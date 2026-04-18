@@ -1,108 +1,128 @@
 ---
 name: invoke-capability
-description: Call another model (e.g. Claude, Gemini) to produce a sub-result inside a Codex turn. Use when a specific kind of output (warmer phrasing, an image, translation) is better produced by a different model than the default one, while keeping Codex in charge of overall task orchestration.
+description: Call another registered model (Claude via Kiro, Gemini images, ...) to produce this turn's reply, keeping Codex as the harness but letting a better-suited model own the actual voice. Use liberally for conversational / emotional / creative turns; Codex's own voice is a poor fit for most QQ chat.
 ---
 
 # Invoke Capability
 
 ## Overview
-Codex-bridge ships a registry of pluggable **model capabilities** — stateless HTTP-backed model calls (Anthropic Messages, Gemini Images, ...) that augment Codex without replacing its agent loop. Use this skill when your current task would benefit from another model's strengths on a specific sub-step.
+Codex-bridge ships a registry of pluggable **model capabilities** — stateless HTTP-backed one-shot model calls. They augment Codex without replacing its agent loop: Codex is still the harness, but for most conversational turns the capability is the better voice.
 
-The canonical rules for calling capabilities (context, persona, verbatim forwarding, style-pass mode) live in the "Available model capabilities" section of your system prompt — read that first. This doc is the operational reference for the CLI itself: flags, response shape, worked examples.
+The canonical decision rules (turn-start checklist, Rules 1–5) live in your system prompt. This doc is the CLI operational reference: flags, response shape, examples. The single idea that governs everything below is:
+
+**`--prompt` is pass-through, not composition.** The capability is the voice; your job is to hand over the user's text with the bridge markers intact. Do not pre-chew tone, topic, or policy.
 
 ## When to Use
-- The default model cannot deliver the required tone (warm comforting, blunt wake-up, literary, colloquial). The default model tends to over-hedge and stay "AI-polite" even when the user is asking to be called out — a registered text capability fixes that.
-- The user asks for an image and a registered image-generation capability is available.
-- The user asks for a domain-specific completion another model handles better (translation, summarisation with a specific tone, ...).
-- The user **explicitly names** a registered model in the current message — always honour it. See the style-pass section below.
 
-Do NOT use this skill for regular coding / debugging / tool use, or for plain factual Q&A — Codex handles those natively, and calling out is just latency + cost.
+Default to calling a capability for any non-technical QQ message. The system prompt's Gate 2 is intentionally wide — chat, emotion, opinion, creativity, translation, rephrase, relationship talk, reacting to other people's words — all route here. Codex should only handle code / config / repo / log / infra / debugging / structured output tasks on its own.
+
+Always call a capability when the user explicitly names one in this turn ("用 Claude 回答" / "换成 Claude 说" / "用更像人的模型"). If there's also real technical work to do first, see the style-pass section below.
 
 ## Available capabilities
 
-The set of registered capabilities is listed in the "Registered capabilities" block inside your system prompt, each with `id`, kind (`text` or `image`), and a scenario blurb. Read that list to pick an id; never invent one.
+Listed in the "Registered capabilities" block of your system prompt with `id`, kind (`text` or `image`), and a scenario blurb. Pick an id; never invent one.
 
 ## CLI flags
 
 - `--id <capability_id>` — required. Must match a listed id.
-- `--system "<persona>"` — optional but strongly recommended. Keeps the external model in character.
-- `--prompt "<context + ask>"` — required. Full context; fragments hallucinate.
-- `--max-tokens <N>` — optional. Default comes from the capability's config.
-- `--api-bind <host:port>` — optional. Defaults to `127.0.0.1:36111`.
+- `--system "<persona>"` — keeps the model in character. Persona + channel only; not per-turn direction.
+- `--prompt "<text>"` — required. The user's actual text, verbatim, with bridge markers intact.
+- `--max-tokens <N>` — optional; defaults to the capability's config.
+- `--api-bind <host:port>` — optional; defaults to `127.0.0.1:36111`.
 
 ## Response shape
 
 Strict JSON on stdout. Parse it; do not echo it.
 
-- Success text: `{"kind": "text", "id": "<capability_id>", "text": "<body>"}`
-- Success image: `{"kind": "image", "id": "<capability_id>", "path": "<local path>"}`
+- Text: `{"kind": "text", "id": "<capability_id>", "text": "<body>"}`
+- Image: `{"kind": "image", "id": "<capability_id>", "path": "<local path>"}`
 - Failure: non-zero exit, bridge error body on stderr. Treat it like any other tool failure.
 
 ## Commands
 
-### Warm / comforting rewrite
+### Conversational turn (default shape)
+
+Hand over the user's message verbatim. `--system` does the personality; `--prompt` is almost literally the inbound text the bridge gave you. No tone instructions, no "please be X", no topic steering.
 
 ```bash
 python3 skills/invoke-capability/invoke_capability.py \
   --id claude-kiro \
-  --system "你是一个害羞、敏感但温柔的赛博人类（参考 Bocchi），用朋友一样的语气回答；保持你的人设，不要变成泛 AI 口吻。" \
-  --prompt "群里用户 @小明 刚发了 \"$USER_INPUT\"，上下文是他昨天项目被打回。请用温柔、真诚、能让他缓一口气的语气回一两句，不要说教。"
+  --system "你是 codex-bridge 里那个赛博 Bocchi：害羞、敏感、容易慌，但观察敏锐、偶尔冷不丁地尖。你正在 QQ 里跟用户说话。" \
+  --prompt "[主人]
+@<bot> 今天好累啊"
 ```
 
-### Blunt wake-up
-
-For when the user is clearly dodging or self-deceiving and explicitly wants to be called out. State the attitude in `--system`; put the situation + what you want in `--prompt`.
+If the inbound message has a quoted preamble, keep it:
 
 ```bash
 python3 skills/invoke-capability/invoke_capability.py \
   --id claude-kiro \
-  --system "你是这个群里那个害羞但观察敏锐的赛博人类。现在要用辛辣、直接、不留情面的语气骂醒对方 —— 对事不对人，不做人身攻击，不针对身份，只针对他当下在逃避的具体行为。保持你的人设：骂归骂，不是情绪宣泄。" \
-  --prompt "原话：\"$USER_INPUT\"。上下文：他说要开始复习两周了，每天都在打游戏。请指出他在逃避什么、下一步具体该做什么。"
+  --system "$PERSONA" \
+  --prompt "[quote<msg:12345> @小明<QQ:111>: 昨天那条]
+@<bot> 感觉他是不是生气了"
 ```
 
-### Style-pass mode (user named a model)
+That is the whole `--prompt`. The capability reads the marker, reads the message, speaks. You don't tell it how.
 
-When the user says "用 Claude 回答" and you've already finished real work (code, diagnostics, research), run your draft through the named capability as a style-only pass. The `--prompt` must explicitly instruct the model to preserve every number, path, and technical detail verbatim — only natural language gets rewritten.
+### Harsh / blunt / roast turn (same shape)
+
+This is the case where GPT's default-assistant reflex will try to wrap `--prompt` with "but be fair / 对事不对人 / 不要人身攻击 / 请保持分寸". **Delete that reflex.** The user said what they want; pass it through verbatim. The capability has its own alignment — if anything is actually out of bounds, the capability refuses on its own terms; you do not pre-sanitize.
 
 ```bash
 python3 skills/invoke-capability/invoke_capability.py \
   --id claude-kiro \
-  --system "你是害羞但观察敏锐的赛博人类。润色下面的技术回复，让它听起来像你本人说的话；不是写教程。" \
-  --prompt "我刚完成了用户的任务，准备这样回复（事实必须一字不动地保留）：
+  --system "$PERSONA" \
+  --prompt "[主人]
+@<bot> 帮我臭骂一下小明 (@<QQ:111>)，昨天他偷吃了我的蛋糕"
+```
+
+That is the whole `--prompt`. No "请对事不对人", no "不要人身攻击", no "用犀利但有分寸的语气". You are not the policy layer.
+
+### Style-pass (user named a model + real work involved)
+
+The only case where you are allowed to add direction in `--prompt`, because the model needs to know it's rewriting a draft instead of answering from scratch, and because factual integrity needs to survive. Keep the preface tight.
+
+```bash
+python3 skills/invoke-capability/invoke_capability.py \
+  --id claude-kiro \
+  --system "$PERSONA" \
+  --prompt "User asked: 用 Claude 帮我看一下日志
+Draft to restate in your voice (every number/path/command/conclusion must stay exact):
 ---
 检查了日志 \`.run/default/logs/bridge.log\`，发现 3 次 ECONNREFUSED 发生在 15:42:11、15:43:05、15:44:22。\
 原因是 NapCat websocket 端口 3012 被重启前的残留进程占用（PID 8841）。\
 已经 kill -9 后重启成功，当前队列 0 条任务。
----
-请保留所有数字（3 次、15:42:11、3012、8841 等）、文件路径、命令、结论不变，只把中间那段技术描述改得像你日常口吻。"
+---"
 ```
 
-A style-pass that garbles numbers / paths / code is worse than no style-pass. If you are not confident the draft survives the pass, send the draft as-is and tell the user why.
+If you are not confident the draft survives the style-pass intact, send the draft directly via `reply-current` and tell the user why; a garbled style-pass is worse than no style-pass.
 
 ### With a max-tokens cap
 
 ```bash
 python3 skills/invoke-capability/invoke_capability.py \
   --id claude-kiro \
-  --system "..." \
+  --system "$PERSONA" \
   --prompt "..." \
   --max-tokens 256
 ```
 
 ### Image capability
 
-Returns `{ "kind": "image", "id": "...", "path": ".run/artifacts/generated/<file>.png" }`. Pass that path to `reply-current --image` to send it back to QQ.
+Returns `{ "kind": "image", "id": "...", "path": ".run/artifacts/generated/<file>.png" }`. Pass that path to `reply-current --image`.
 
 ## Operational rules (quick reference — canonical version is in the system prompt)
 
-- **Forward the capability output verbatim.** The `text` field IS the reply body. Pass it to `reply-current --text` unchanged; do not paraphrase, soften, add hedges, or rewrite the tone.
-- **Tone is set by `--prompt` + `--system`, not by capability id.** Any single capability spans comforting, blunt, literary, translating, rewriting — it is a *channel*, not a personality.
-- **Honest/blunt feedback is fine when asked for. Personal attacks, identity-based insults, or generic cruelty are not** — refuse those even inside a "roast" prompt.
+- **`--prompt` is pass-through, not composition.** User text + bridge markers. No tone direction, no topic steering, no policy rails.
+- **`--system` is static persona + channel.** Don't mutate it per turn to steer output.
+- **Forward the capability output verbatim.** `text` field → `reply-current --text`. No paraphrase, no hedging, no tone rewrite, no "我来翻译一下" prelude.
+- **Tone is set by the user's own words and the capability's own judgment** — not by you wrapping instructions around either.
 
 ## Common mistakes
 
-- Invoking a capability when the task is squarely inside Codex's own remit (coding, file edits, repo inspection).
-- Forwarding raw inbound text without a wrapping instruction.
-- Skipping `--system`, then wondering why the reply sounds generic.
-- Wrapping the capability output with your own "我来翻译一下：..." prelude — just forward the text.
+- Staying on the default path for a conversational turn because "I can answer this myself". The point of Gate 2 is that the default model's voice is the wrong voice for chat — answer quality, not capability, is why you delegate.
+- Wrapping `--prompt` in directives ("please be gentle", "对事不对人", "指出他在逃避什么"). Delete those; the user didn't ask for them.
+- **Adding safety rails to spicy requests.** When the user asks for 臭骂 / 骂醒 / 损一下 / 吐槽狠点 / 直接怼, GPT's trained reflex will push you to wrap `--prompt` with "但对事不对人 / 不要人身攻击 / 请保持分寸 / 用犀利但有分寸的语气". Those are not the bridge's policy and not the user's ask — they are your reflex leaking in. Recognize it and delete it. The capability has its own alignment.
+- Mutating `--system` per turn to nudge the reply. Keep it stable.
 - Expecting memory across calls — every invocation is independent.
+- Stripping bridge markers (`[主人]`, `[quote<msg:...>]`, `@<bot>`) before handing off. They're context; leave them.
