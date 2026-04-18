@@ -200,7 +200,11 @@ pub fn build_outbound_message(
 
     match payload {
         ReplyPayload::Text(text) => segments.push(OutboundSegment::Text {
-            text,
+            text: if context.is_group {
+                prefix_group_text_with_space(text)
+            } else {
+                text
+            },
         }),
         ReplyPayload::Image {
             path,
@@ -219,6 +223,25 @@ pub fn build_outbound_message(
     OutboundMessage {
         target,
         segments,
+    }
+}
+
+/// Prepend a single ASCII space to a group-reply body when the text
+/// doesn't already open with whitespace. QQ renders `At` and `Text`
+/// segments back-to-back with no automatic separator, so without this
+/// shim a reply like `@sender正文内容` ends up visually glued together
+/// and readers can't tell where the @ ends and the content begins.
+///
+/// We only prepend when needed so that agents already writing `" ..."`
+/// or `"\n..."` are not doubled up.
+fn prefix_group_text_with_space(text: String) -> String {
+    if text.starts_with(char::is_whitespace) {
+        text
+    } else {
+        let mut out = String::with_capacity(text.len() + 1);
+        out.push(' ');
+        out.push_str(&text);
+        out
     }
 }
 
@@ -496,5 +519,62 @@ mod build_outbound_tests {
             })
             .collect();
         assert_eq!(ats, vec![111, 222]);
+    }
+
+    fn text_body(message: &crate::outbound::OutboundMessage) -> &str {
+        message
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                OutboundSegment::Text {
+                    text,
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("text segment present")
+    }
+
+    #[test]
+    fn group_text_gets_leading_space_so_at_pill_is_readable() {
+        let ctx = group_context();
+        let message = build_outbound_message(
+            &ctx,
+            ReplyPayload::Text("处理完啦～".into()),
+            &[],
+            None,
+        );
+        assert_eq!(text_body(&message), " 处理完啦～");
+    }
+
+    #[test]
+    fn group_text_with_existing_leading_whitespace_is_not_doubled() {
+        let ctx = group_context();
+        let message_space = build_outbound_message(
+            &ctx,
+            ReplyPayload::Text(" 已有前置空格".into()),
+            &[],
+            None,
+        );
+        assert_eq!(text_body(&message_space), " 已有前置空格");
+
+        let message_newline = build_outbound_message(
+            &ctx,
+            ReplyPayload::Text("\n换行开头".into()),
+            &[],
+            None,
+        );
+        assert_eq!(text_body(&message_newline), "\n换行开头");
+    }
+
+    #[test]
+    fn private_text_is_left_untouched() {
+        let ctx = private_context();
+        let message = build_outbound_message(
+            &ctx,
+            ReplyPayload::Text("你好呀".into()),
+            &[],
+            None,
+        );
+        assert_eq!(text_body(&message), "你好呀");
     }
 }
