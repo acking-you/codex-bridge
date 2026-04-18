@@ -20,6 +20,8 @@ fn make_task(conversation_key: &str, source_sender_id: i64, source_message_id: i
         } else {
             source_sender_id
         },
+        self_id: 99,
+        quoted_message_id: None,
     }
 }
 

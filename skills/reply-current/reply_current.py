@@ -38,6 +38,16 @@ def parse_args() -> argparse.Namespace:
              "Pass one or more numeric QQ ids. Ignored for private chats.",
     )
     parser.add_argument(
+        "--reply-to",
+        type=int,
+        default=None,
+        help="QQ message id to quote with the outbound reply instead of the inbound "
+             "triggering message. Useful when the user asked you to locate an earlier "
+             "chat record and you want the reply pill to jump straight to it. "
+             "Omitting this preserves the default (quote the triggering message). "
+             "Ignored for private chats.",
+    )
+    parser.add_argument(
         "--api-bind",
         default="127.0.0.1:36111",
         help="codex-bridge local API bind address.",
@@ -72,6 +82,7 @@ def build_payload(args: argparse.Namespace, context: dict[str, object], root: Pa
         "image": None,
         "file": None,
         "at": args.at if args.at else [],
+        "reply_to": args.reply_to,
     }
     if args.text is not None:
         payload["text"] = normalize_escape_sequences(args.text)

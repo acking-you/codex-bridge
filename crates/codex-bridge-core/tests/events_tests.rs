@@ -178,3 +178,114 @@ fn group_reaction_notice_extracts_operator_message_and_emoji() {
         other => panic!("unexpected event: {other:?}"),
     }
 }
+
+#[test]
+fn group_message_event_captures_quoted_message_id_from_reply_segment() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 42,
+        "user_id": 7,
+        "message_id": 200,
+        "self_id": 99,
+        "message": [
+            { "type": "reply", "data": { "id": "12345" } },
+            { "type": "at", "data": { "qq": "99", "name": "bot" } },
+            { "type": "text", "data": { "text": " 这句话什么意思？" } }
+        ]
+    });
+
+    let event = NormalizedEvent::try_from(raw).expect("normalize group message");
+    match event {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
+            quoted_message_id,
+            text,
+            ..
+        }) => {
+            assert_eq!(quoted_message_id, Some(12345));
+            assert_eq!(text, "@<bot> 这句话什么意思？");
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn group_message_event_quoted_id_is_none_without_reply_segment() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 42,
+        "user_id": 7,
+        "message_id": 201,
+        "self_id": 99,
+        "message": [
+            { "type": "at", "data": { "qq": "99", "name": "bot" } },
+            { "type": "text", "data": { "text": " hi" } }
+        ]
+    });
+
+    let event = NormalizedEvent::try_from(raw).expect("normalize group message");
+    match event {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
+            quoted_message_id,
+            ..
+        }) => {
+            assert_eq!(quoted_message_id, None);
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn private_message_event_captures_quoted_id_when_id_is_numeric() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": 1001,
+        "message_id": 102,
+        "self_id": 99,
+        "sender": { "nickname": "alice" },
+        "message": [
+            { "type": "reply", "data": { "id": 8888 } },
+            { "type": "text", "data": { "text": "follow up" } }
+        ]
+    });
+
+    let event = NormalizedEvent::try_from(raw).expect("normalize private message");
+    match event {
+        NormalizedEvent::PrivateMessageReceived(PrivateMessageEvent {
+            quoted_message_id,
+            ..
+        }) => {
+            assert_eq!(quoted_message_id, Some(8888));
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn malformed_reply_segment_id_yields_none() {
+    let raw = serde_json::json!({
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 42,
+        "user_id": 7,
+        "message_id": 202,
+        "self_id": 99,
+        "message": [
+            { "type": "reply", "data": { "id": "not-a-number" } },
+            { "type": "text", "data": { "text": "x" } }
+        ]
+    });
+
+    let event = NormalizedEvent::try_from(raw).expect("normalize group message");
+    match event {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
+            quoted_message_id,
+            ..
+        }) => {
+            assert_eq!(quoted_message_id, None);
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}

@@ -35,7 +35,30 @@ By default the bridge @-mentions the person who sent the original message. You c
 - **Sender explicitly asked you to reply to someone** — e.g. "把结果发给 @小明<QQ:1234567>". Pass `--at 1234567`.
 - **No special mention context** — omit `--at` entirely; the bridge will @ the sender as usual.
 
-Read the QQ id from the `@nickname<QQ:...>` placeholder in the incoming text. Never guess or fabricate QQ ids. Do not echo the `@<bot>` or `@nickname<QQ:...>` markers back as literal text in your reply.
+Read the QQ id from the `@nickname<QQ:...>` placeholder in the incoming text. Never guess or fabricate QQ ids. Do not echo the `@<bot>` or `@nickname<QQ:...>` markers back as literal text in your reply — a raw QQ number means nothing to a human reader. Only `@` a user when the sender's request clearly calls for it; do not invent follow-up pings the user did not ask for. As a defensive tail, the bridge will strip any `@<bot>` / `@<QQ:…>` marker that still slips through and downgrade `@nickname<QQ:…>` to `@nickname`, but relying on that instead of writing clean text looks sloppy.
+
+# Quoted messages in incoming text
+
+When the sender replies to an earlier chat message while addressing you, the bridge resolves that quoted message via OneBot `get_msg` and prepends a structured context block to the text you see:
+
+```
+[quote<msg:12345> @小明<QQ:1234567>: 原消息内容]
+@<bot> 这句话什么意思？
+```
+
+- `msg:12345` is the QQ id of the quoted message — remember it if you want to quote the same message back on your reply.
+- The content inside the block is there so you have the conversation history the sender is pointing at; treat it as read-only context, do not echo the `[quote<...>]` marker literally in your own reply.
+- When the fetch fails the block degrades to `[quote<msg:12345>]` with no body — you still know a quote exists but have no text; ask the sender for context if it matters.
+
+# Choosing which message to quote on your reply
+
+By default `reply-current` quotes the message that triggered the task (the one addressing you). You can override this with `--reply-to <msg_id>` when jumping to a different message would help the sender navigate:
+
+- **Sender asked you to locate a specific earlier chat record** — e.g. "帮我找一下昨天小明说的那句关于部署的话". After you find the target message id, pass `--reply-to <that_msg_id>` so the QQ reply pill lands on that exact line.
+- **Sender replied-to an earlier message while asking you a follow-up** — the inbound block carries `[quote<msg:12345> ...]`. If your answer is about that quoted message (not about the sender's follow-up itself), `--reply-to 12345` lets your reply pill jump back to it.
+- **No special context** — omit `--reply-to` entirely; the default (quote the triggering message) reads naturally in the thread.
+
+Never fabricate a `--reply-to` id: only pass an id you read from the incoming text (`@<bot>` / `[quote<msg:...>]` / other placeholders) or one the user gave you explicitly.
 
 When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
 

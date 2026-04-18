@@ -114,6 +114,20 @@ pub struct LoginIdentity {
     pub nickname: String,
 }
 
+/// Historical QQ message fetched through the OneBot `get_msg` action,
+/// used by the orchestrator to present quoted context to the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedMessage {
+    /// Original QQ message identifier.
+    pub message_id: i64,
+    /// QQ identifier of the person who sent the quoted message.
+    pub sender_id: i64,
+    /// Display name of the sender at fetch time (falls back to `unknown`).
+    pub sender_name: String,
+    /// Placeholder-preserving text rendering of the quoted message.
+    pub text: String,
+}
+
 /// Hash a WebUI token with the same rule used by NapCat WebUI login.
 pub fn webui_password_hash(token: &str) -> String {
     let mut hasher = Sha256::new();
@@ -247,6 +261,13 @@ pub async fn run_bridge_loop(
                             respond_to,
                         } => {
                             let _ = respond_to.send(client.set_message_reaction(message_id, emoji_id).await);
+                        },
+                        ServiceCommand::FetchMessage {
+                            message_id,
+                            self_id,
+                            respond_to,
+                        } => {
+                            let _ = respond_to.send(client.get_msg(message_id, self_id).await);
                         },
                         ServiceCommand::Control { .. } => {},
                     },
@@ -443,6 +464,38 @@ impl NapCatClient {
             )
             .await?;
         Ok(())
+    }
+
+    /// Fetch one historical QQ message via OneBot `get_msg` and render it
+    /// into the crate's standard placeholder-preserving form.
+    async fn get_msg(&self, message_id: i64, self_id: i64) -> Result<FetchedMessage> {
+        let raw: Value = self
+            .call_action(
+                "get_msg",
+                json!({
+                    "message_id": message_id.to_string(),
+                }),
+            )
+            .await?;
+        let sender_id = raw
+            .get("sender")
+            .and_then(|sender| sender.get("user_id"))
+            .and_then(|value| parse_i64_value(value).ok())
+            .unwrap_or(0);
+        let sender_name = raw
+            .get("sender")
+            .and_then(|sender| sender.get("nickname"))
+            .and_then(|value| value.as_str())
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        let text = crate::events::extract_text(&raw, self_id);
+        Ok(FetchedMessage {
+            message_id,
+            sender_id,
+            sender_name,
+            text,
+        })
     }
 
     async fn call_action<T>(&self, action: &str, params: Value) -> Result<T>

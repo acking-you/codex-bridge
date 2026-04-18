@@ -29,6 +29,8 @@ pub struct PrivateMessageEvent {
     pub mentions: Vec<i64>,
     /// Whether the message explicitly mentioned the bot account.
     pub mentions_self: bool,
+    /// QQ message id quoted by this message (OneBot `reply` segment), if any.
+    pub quoted_message_id: Option<i64>,
     /// Raw JSON payload for debugging.
     pub raw: Value,
 }
@@ -52,6 +54,8 @@ pub struct GroupMessageEvent {
     pub mentions: Vec<i64>,
     /// Whether the message explicitly mentioned the bot account.
     pub mentions_self: bool,
+    /// QQ message id quoted by this message (OneBot `reply` segment), if any.
+    pub quoted_message_id: Option<i64>,
     /// Raw JSON payload for debugging.
     pub raw: Value,
 }
@@ -110,6 +114,7 @@ fn normalize_message_event(value: Value) -> Result<NormalizedEvent, NormalizeEve
     let mentions_self = mentions.contains(&self_id);
     let text = extract_text(&value, self_id);
     let sender_name = extract_sender_name(&value);
+    let quoted_message_id = extract_quoted_message_id(&value);
 
     match message_type {
         "private" => Ok(NormalizedEvent::PrivateMessageReceived(PrivateMessageEvent {
@@ -120,6 +125,7 @@ fn normalize_message_event(value: Value) -> Result<NormalizedEvent, NormalizeEve
             text,
             mentions,
             mentions_self,
+            quoted_message_id,
             raw: value,
         })),
         "group" => Ok(NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
@@ -131,6 +137,7 @@ fn normalize_message_event(value: Value) -> Result<NormalizedEvent, NormalizeEve
             text,
             mentions,
             mentions_self,
+            quoted_message_id,
             raw: value,
         })),
         _ => Err(NormalizeEventError::Unsupported),
@@ -218,6 +225,29 @@ fn extract_mentions(value: &Value) -> Vec<i64> {
     mentions
 }
 
+/// Find the first OneBot `reply` segment and return its quoted message id.
+///
+/// NapCat encodes the id as a string, so we parse it defensively. Unknown,
+/// missing, or malformed ids return `None` — the consumer should treat the
+/// absence of a quote as the base case rather than failing the whole event.
+fn extract_quoted_message_id(value: &Value) -> Option<i64> {
+    let segments = value.get("message").and_then(Value::as_array)?;
+    for segment in segments {
+        if segment.get("type").and_then(Value::as_str) != Some("reply") {
+            continue;
+        }
+        let raw = segment.get("data").and_then(|data| data.get("id"))?;
+        if let Some(text) = raw.as_str() {
+            if let Ok(id) = text.parse::<i64>() {
+                return Some(id);
+            }
+        } else if let Some(id) = raw.as_i64() {
+            return Some(id);
+        }
+    }
+    None
+}
+
 fn extract_sender_name(value: &Value) -> String {
     let sender = value.get("sender").or_else(|| value.get("sender_id"));
     if let Some(sender) = sender.and_then(Value::as_object) {
@@ -251,7 +281,7 @@ fn extract_sender_name(value: &Value) -> String {
 ///   segment carries a `name` so the agent sees both the displayed name and
 ///   the underlying QQ id, or `@<QQ:1234>` when no name was supplied.
 /// - Unknown segment types are dropped.
-fn extract_text(value: &Value, self_id: i64) -> String {
+pub(crate) fn extract_text(value: &Value, self_id: i64) -> String {
     if let Some(segments) = value.get("message").and_then(Value::as_array) {
         let mut buf = String::new();
         for segment in segments {

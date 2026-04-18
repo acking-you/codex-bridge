@@ -56,6 +56,13 @@ pub struct TaskRequest {
     pub is_group: bool,
     /// Conversation id for response routing.
     pub reply_target_id: i64,
+    /// Bot self-id captured from the inbound event. Kept on the task so the
+    /// orchestrator can render OneBot `get_msg` payloads with the same
+    /// `@<bot>` placeholder rules the inbound pipeline already uses.
+    pub self_id: i64,
+    /// QQ message id quoted by the inbound message, if any. Set when the
+    /// OneBot payload carried a `reply` segment.
+    pub quoted_message_id: Option<i64>,
 }
 
 /// Request object carrying metadata for command execution.
@@ -195,6 +202,8 @@ impl MessageRouter {
             source_text: source_text.to_string(),
             is_group: false,
             reply_target_id: event.sender_id,
+            self_id: event.self_id,
+            quoted_message_id: event.quoted_message_id,
         }))
     }
 
@@ -240,6 +249,8 @@ impl MessageRouter {
             source_text: source_text.to_string(),
             is_group: true,
             reply_target_id: event.group_id,
+            self_id: event.self_id,
+            quoted_message_id: event.quoted_message_id,
         }))
     }
 }

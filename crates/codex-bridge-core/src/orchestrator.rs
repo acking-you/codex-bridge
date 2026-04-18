@@ -672,6 +672,79 @@ async fn private_sender_is_friend(state: &ServiceState, task: &TaskRequest) -> b
         .any(|friend| friend.user_id == task.source_sender_id)
 }
 
+/// Time budget for the `get_msg` lookup used when the inbound message
+/// quotes another message. A few seconds is enough for a responsive
+/// NapCat; exceeding it falls back to an id-only quote block so the
+/// agent can still see that something was quoted.
+const QUOTED_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// When `task.quoted_message_id` is set, fetch the referenced message via
+/// OneBot `get_msg` and prepend a structured marker block to `source_text`
+/// so the agent has the quoted conversation in plain sight.
+///
+/// Marker format matches the existing `@<QQ:...>` placeholder style:
+///
+/// ```text
+/// [quote<msg:12345> @nickname<QQ:111>: 原消息内容]
+/// @<bot> 实际问题
+/// ```
+///
+/// On fetch failure the block degrades to `[quote<msg:12345>]` so the
+/// agent still knows a quote exists and can use the id with `--reply-to`.
+async fn enrich_task_with_quoted_context(mut task: TaskRequest, state: &ServiceState) -> TaskRequest {
+    let Some(quoted_id) = task.quoted_message_id else {
+        return task;
+    };
+
+    let fetched = tokio::time::timeout(
+        QUOTED_FETCH_TIMEOUT,
+        state.fetch_message(quoted_id, task.self_id),
+    )
+    .await;
+
+    let preamble = match fetched {
+        Ok(Ok(message)) => {
+            let body = message.text.trim();
+            let name = message.sender_name.trim();
+            let header = if message.sender_id > 0 && !name.is_empty() {
+                format!("@{name}<QQ:{}>", message.sender_id)
+            } else if message.sender_id > 0 {
+                format!("@<QQ:{}>", message.sender_id)
+            } else {
+                String::new()
+            };
+            if header.is_empty() {
+                format!("[quote<msg:{quoted_id}>: {body}]")
+            } else if body.is_empty() {
+                format!("[quote<msg:{quoted_id}> {header}]")
+            } else {
+                format!("[quote<msg:{quoted_id}> {header}: {body}]")
+            }
+        },
+        Ok(Err(error)) => {
+            warn!(
+                conversation = %task.conversation_key,
+                quoted_message_id = quoted_id,
+                %error,
+                "get_msg lookup failed; surfacing id-only quote marker",
+            );
+            format!("[quote<msg:{quoted_id}>]")
+        },
+        Err(_) => {
+            warn!(
+                conversation = %task.conversation_key,
+                quoted_message_id = quoted_id,
+                timeout_secs = QUOTED_FETCH_TIMEOUT.as_secs(),
+                "get_msg lookup timed out; surfacing id-only quote marker",
+            );
+            format!("[quote<msg:{quoted_id}>]")
+        },
+    };
+
+    task.source_text = format!("{preamble}\n{}", task.source_text);
+    task
+}
+
 async fn register_pending_approval(
     task: TaskRequest,
     replies: &dyn ReplySink,
@@ -1464,6 +1537,7 @@ pub async fn run(
                                     }
                                 },
                                 RouteDecision::Task(task) => {
+                                    let task = enrich_task_with_quoted_context(task, &state).await;
                                     if !task.is_group
                                         && !is_admin_task(&task, config.admin_user_id)
                                         && !private_sender_is_friend(&state, &task).await

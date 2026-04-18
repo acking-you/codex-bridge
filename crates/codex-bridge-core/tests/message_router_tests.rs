@@ -73,6 +73,8 @@ fn private_message_routes_to_task_by_default() {
             source_text: "hello".to_string(),
             is_group: false,
             reply_target_id: 10,
+            self_id: 99,
+            quoted_message_id: None,
         })
     );
 }

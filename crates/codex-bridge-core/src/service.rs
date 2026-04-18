@@ -140,6 +140,16 @@ pub enum ServiceCommand {
         /// Response channel for completion.
         respond_to: oneshot::Sender<Result<()>>,
     },
+    /// Fetch a historical QQ message via OneBot `get_msg` so the orchestrator
+    /// can surface it as quoted context to the agent.
+    FetchMessage {
+        /// Target QQ message identifier.
+        message_id: i64,
+        /// Bot self-id used to render the placeholder-preserving text.
+        self_id: i64,
+        /// Response channel carrying the rendered message.
+        respond_to: oneshot::Sender<Result<crate::napcat::FetchedMessage>>,
+    },
     /// Route an orchestrator control command.
     Control {
         /// Payload for a local control command.
@@ -248,6 +258,12 @@ impl ServiceState {
                         respond_to, ..
                     } => {
                         let _ = respond_to.send(Ok(()));
+                    },
+                    ServiceCommand::FetchMessage {
+                        respond_to, ..
+                    } => {
+                        let _ = respond_to
+                            .send(Err(anyhow!("FetchMessage is not available in for_tests")));
                     },
                     ServiceCommand::Control {
                         command: _,
@@ -416,6 +432,31 @@ impl ServiceState {
             .send(ServiceCommand::SetMessageReaction {
                 message_id,
                 emoji_id,
+                respond_to,
+            })
+            .await
+            .map_err(|_| anyhow!("bridge worker is not available"))?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("bridge worker dropped the response"))?
+    }
+
+    /// Fetch one historical QQ message via OneBot `get_msg`.
+    ///
+    /// `self_id` is forwarded so the fetched text is rendered with the same
+    /// `@<bot>` placeholder rules the orchestrator already uses for live
+    /// events.
+    pub async fn fetch_message(
+        &self,
+        message_id: i64,
+        self_id: i64,
+    ) -> Result<crate::napcat::FetchedMessage> {
+        let (respond_to, response_rx) = oneshot::channel();
+        self.inner
+            .command_tx
+            .send(ServiceCommand::FetchMessage {
+                message_id,
+                self_id,
                 respond_to,
             })
             .await

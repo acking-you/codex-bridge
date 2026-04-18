@@ -240,6 +240,8 @@ fn make_task(source_message_id: i64, conversation_key: &str) -> TaskRequest {
         source_text: "修一下 README".to_string(),
         is_group: false,
         reply_target_id: 42,
+        self_id: 99,
+        quoted_message_id: None,
     }
 }
 
@@ -400,6 +402,12 @@ fn spawn_bridge_sink(
                 ServiceCommand::Control {
                     ..
                 } => {},
+                ServiceCommand::FetchMessage {
+                    respond_to, ..
+                } => {
+                    let _ = respond_to
+                        .send(Err(anyhow::anyhow!("FetchMessage stubbed out in tests")));
+                },
             }
         }
     })
