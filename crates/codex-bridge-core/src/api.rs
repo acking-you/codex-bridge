@@ -16,6 +16,7 @@ use tracing::{debug, info};
 
 use crate::{
     message_router::{CommandRequest, ControlCommand},
+    model_capability::{CapabilityInput, CapabilityOutput},
     outbound::{build_outbound_message, ReplyRequest},
     service::{SendMessageReceipt, ServiceState, TaskSnapshot},
 };
@@ -32,6 +33,8 @@ pub fn build_router(state: ServiceState) -> Router {
         .route("/api/tasks/cancel", post(cancel_handler))
         .route("/api/tasks/retry-last", post(retry_last_handler))
         .route("/api/reply", post(reply_handler))
+        .route("/api/capability/invoke", post(capability_invoke_handler))
+        .route("/api/capability/reload", post(capability_reload_handler))
         .route("/api/events/ws", get(events_ws_handler))
         .route("/api/messages/private", post(send_private_handler))
         .route("/api/messages/group", post(send_group_handler))
@@ -269,6 +272,106 @@ async fn reply_handler(
         status: "ok",
         receipt,
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CapabilityInvokeRequest {
+    id: String,
+    prompt: String,
+    #[serde(default)]
+    system: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CapabilityInvokeResponse {
+    Text {
+        id: String,
+        text: String,
+    },
+    Image {
+        id: String,
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CapabilityReloadResponse {
+    status: &'static str,
+    capability_count: usize,
+}
+
+async fn capability_invoke_handler(
+    State(state): State<ServiceState>,
+    Json(payload): Json<CapabilityInvokeRequest>,
+) -> Result<Json<CapabilityInvokeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if payload.id.trim().is_empty() {
+        return Err(bad_request("capability id must not be empty"));
+    }
+    let registry = state.capabilities().await;
+    let Some(capability) = registry.get(payload.id.as_str()) else {
+        return Err(bad_request(
+            format!("unknown capability id: {}", payload.id).as_str(),
+        ));
+    };
+    let input = CapabilityInput {
+        prompt: payload.prompt,
+        system: payload.system,
+        max_tokens: payload.max_tokens,
+    };
+    debug!(
+        capability = capability.id(),
+        prompt_len = input.prompt.len(),
+        system_len = input.system.as_deref().map(str::len).unwrap_or(0),
+        "invoking model capability"
+    );
+    match capability.invoke(&input).await {
+        Ok(CapabilityOutput::Text {
+            text,
+        }) => Ok(Json(CapabilityInvokeResponse::Text {
+            id: capability.id().to_string(),
+            text,
+        })),
+        Ok(CapabilityOutput::Image {
+            path,
+        }) => Ok(Json(CapabilityInvokeResponse::Image {
+            id: capability.id().to_string(),
+            path: path.to_string_lossy().into_owned(),
+        })),
+        Err(error) => {
+            info!(
+                capability = capability.id(),
+                %error,
+                "model capability returned an error"
+            );
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            ))
+        },
+    }
+}
+
+async fn capability_reload_handler(
+    State(state): State<ServiceState>,
+) -> Result<Json<CapabilityReloadResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state.reload_capabilities().await {
+        Ok(capability_count) => {
+            info!(capability_count, "model capabilities reloaded");
+            Ok(Json(CapabilityReloadResponse {
+                status: "ok",
+                capability_count,
+            }))
+        },
+        Err(error) => {
+            info!(%error, "model capabilities reload failed");
+            Err(bad_request(error.to_string().as_str()))
+        },
+    }
 }
 
 fn bad_request(message: &str) -> (StatusCode, Json<ErrorResponse>) {

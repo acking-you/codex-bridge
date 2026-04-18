@@ -1,0 +1,43 @@
+# codex-bridge model capabilities registry
+#
+# Each [[capabilities]] table declares one pluggable model backend that
+# Codex can invoke via the `invoke-capability` skill. Add a new block
+# per model, then restart the bridge so the registry reloads.
+#
+# IMPORTANT: This file contains plaintext API keys. It is gitignored; do
+# not commit a populated copy. Keep the *.example file checked in as the
+# shared template.
+#
+# Supported `kind` values:
+#   - anthropic_messages  (POST {base_url}/v1/messages, Anthropic schema)
+#
+# Common fields for every capability:
+#   - id             stable identifier used by registry + skill
+#   - kind           implementation key (see above)
+#   - display_name   human-friendly name (shown in prompt + logs)
+#   - scenario       when Codex should reach for it (one sentence)
+#   - tags           optional list of short capability keywords
+#   - base_url       API root (no trailing /v1/messages etc.)
+#   - api_key        plaintext API key
+#   - model          provider-specific model id
+#   - max_tokens     default cap when the caller omits --max-tokens
+#   - anthropic_version  (anthropic_messages only) request header value
+
+# Claude via the local Kiro gateway — stateless one-shot call for
+# anything where Codex's default model feels too formal, too cautious,
+# or too "AI-like". Covers warm comforting, blunt "wake up" feedback,
+# long-form human explanation, rewriting, translation. The tone is
+# decided by how you wrap the prompt; Codex, not this config, chooses
+# which register to use per message.
+#
+# [[capabilities]]
+# id = "claude-kiro"
+# kind = "anthropic_messages"
+# display_name = "Claude via Kiro gateway"
+# scenario = "需要更像人、更具体的语气 —— 从温柔安慰到辛辣骂醒、从写文案到翻译改写。默认模型偏客气、偏「AI 感」、不敢直说时用。"
+# tags = ["human-tone", "roast", "direct-feedback", "rewrite", "translation"]
+# base_url = "http://127.0.0.1:39180/api/kiro-gateway"
+# api_key = "sf-kiro-REPLACE_ME"
+# model = "claude-sonnet-4-6"
+# max_tokens = 1024
+# anthropic_version = "2023-06-01"

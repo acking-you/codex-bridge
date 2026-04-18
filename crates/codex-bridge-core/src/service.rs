@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use tokio::{
     spawn,
@@ -167,6 +167,18 @@ struct ServiceInner {
     command_tx: mpsc::Sender<ServiceCommand>,
     control_tx: mpsc::Sender<ServiceCommand>,
     reply_registry: Mutex<ReplyRegistry>,
+    capabilities: RwLock<Arc<crate::model_capabilities::ModelRegistry>>,
+    /// Shared, hot-reloadable "Available model capabilities" prompt
+    /// block. The same `Arc` is handed to
+    /// [`crate::codex_runtime::CodexRuntimeConfig::capabilities_block`]
+    /// so an operator-triggered reload is visible on Codex's next
+    /// `thread/start` / `thread/resume`.
+    capabilities_prompt_block: Arc<std::sync::RwLock<Option<String>>>,
+    /// Path to `model_capabilities.toml` on disk. Set by the launcher
+    /// before publishing the first registry so
+    /// [`ServiceState::reload_capabilities`] knows which file to
+    /// re-parse. `None` means reload is not wired up (test fixtures).
+    capabilities_file: std::sync::RwLock<Option<PathBuf>>,
 }
 
 /// Cloneable handle shared across the API layer and runtime worker.
@@ -218,6 +230,11 @@ impl ServiceState {
                 command_tx,
                 control_tx,
                 reply_registry: Mutex::new(ReplyRegistry::new(reply_context_file)),
+                capabilities: RwLock::new(Arc::new(
+                    crate::model_capabilities::ModelRegistry::empty(),
+                )),
+                capabilities_prompt_block: Arc::new(std::sync::RwLock::new(None)),
+                capabilities_file: std::sync::RwLock::new(None),
             }),
         }
     }
@@ -476,6 +493,72 @@ impl ServiceState {
             .await
             .map_err(|_| anyhow!("orchestrator is not available"))?;
         Ok(())
+    }
+
+    /// Replace the shared model-capability registry atomically with its
+    /// rendered prompt block. Subsequent callers — both the API layer
+    /// and the Codex runtime (via the shared `capabilities_block`
+    /// `Arc`) — observe the new state on their next access.
+    pub async fn set_capabilities(
+        &self,
+        registry: Arc<crate::model_capabilities::ModelRegistry>,
+    ) {
+        let block = registry.render_prompt_block();
+        *self.inner.capabilities.write().await = registry;
+        match self.inner.capabilities_prompt_block.write() {
+            Ok(mut guard) => *guard = block,
+            Err(poisoned) => {
+                tracing::warn!("capabilities_prompt_block lock poisoned; recovering");
+                *poisoned.into_inner() = block;
+            },
+        }
+    }
+
+    /// Clone a handle to the currently active model-capability
+    /// registry. Cheap: the inner registry is refcounted.
+    pub async fn capabilities(&self) -> Arc<crate::model_capabilities::ModelRegistry> {
+        self.inner.capabilities.read().await.clone()
+    }
+
+    /// Return a cloneable `Arc` handle to the shared capabilities prompt
+    /// block. Hand this to [`crate::codex_runtime::CodexRuntimeConfig`]
+    /// so prompt injection and hot-reload share one cell.
+    pub fn capabilities_prompt_block_handle(
+        &self,
+    ) -> Arc<std::sync::RwLock<Option<String>>> {
+        self.inner.capabilities_prompt_block.clone()
+    }
+
+    /// Tell the bridge where the capabilities TOML lives on disk, so
+    /// [`Self::reload_capabilities`] knows which file to re-parse. Call
+    /// once during launcher setup.
+    pub fn set_capabilities_file(&self, path: PathBuf) {
+        match self.inner.capabilities_file.write() {
+            Ok(mut guard) => *guard = Some(path),
+            Err(poisoned) => {
+                tracing::warn!("capabilities_file lock poisoned; recovering");
+                *poisoned.into_inner() = Some(path);
+            },
+        }
+    }
+
+    /// Re-parse the configured `model_capabilities.toml`, publish the
+    /// new registry and rendered prompt block. Returns the number of
+    /// registered capabilities after the reload. Fails when no file has
+    /// been configured or when the TOML is invalid — neither case
+    /// touches the current live registry.
+    pub async fn reload_capabilities(&self) -> Result<usize> {
+        let path = match self.inner.capabilities_file.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(path) = path else {
+            bail!("capabilities config file is not configured");
+        };
+        let registry = crate::model_capabilities::ModelRegistry::load_from_file(&path)?;
+        let count = registry.len();
+        self.set_capabilities(Arc::new(registry)).await;
+        Ok(count)
     }
 }
 

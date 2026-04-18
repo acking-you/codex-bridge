@@ -18,7 +18,7 @@ use codex_bridge_core::{
         build_turn_start_params, codex_app_server_workdir, describe_server_notification,
         extract_final_reply, is_missing_thread_rollout_error, summarize_turn_result,
     },
-    system_prompt::{load_system_prompt, DEFAULT_SYSTEM_PROMPT_TEMPLATE},
+    system_prompt::{load_persona, BRIDGE_PROTOCOL_TEXT, DEFAULT_PERSONA_TEMPLATE},
 };
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::json;
@@ -32,7 +32,7 @@ fn runtime_config() -> codex_bridge_core::codex_runtime::CodexRuntimeConfig {
     codex_bridge_core::codex_runtime::CodexRuntimeConfig::new(
         "/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs",
         "/tmp/codex-bridge",
-        "/tmp/codex-bridge/.run/default/prompt/system_prompt.md",
+        "/tmp/codex-bridge/.run/default/prompt/persona.md",
         "/tmp/codex-bridge-home",
         "/tmp/codex-bridge-codex-home",
     )
@@ -52,28 +52,34 @@ fn write_skill(workspace_root: &std::path::Path, skill_name: &str) {
 }
 
 #[test]
-fn system_prompt_mentions_reply_skill_and_artifact_boundary() {
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains(".run/artifacts/"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("reply-current"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("staticflow-kiro-log-diagnoser"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("StaticFlow"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("inspect the host machine broadly"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("You are a cyber-human lifeform"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("If someone asks who you are"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("separate paragraph"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains("must never delete files"));
-    assert!(DEFAULT_SYSTEM_PROMPT_TEMPLATE.contains(
+fn persona_template_covers_identity_voice_and_project_skills() {
+    assert!(DEFAULT_PERSONA_TEMPLATE.contains("You are a cyber-human lifeform"));
+    assert!(DEFAULT_PERSONA_TEMPLATE.contains("If someone asks who you are"));
+    assert!(DEFAULT_PERSONA_TEMPLATE.contains("# Voice and vitality"));
+    assert!(DEFAULT_PERSONA_TEMPLATE.contains("staticflow-kiro-log-diagnoser"));
+    assert!(DEFAULT_PERSONA_TEMPLATE.contains("StaticFlow"));
+}
+
+#[test]
+fn bridge_protocol_covers_turn_checklist_reply_and_permissions() {
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("# Turn start checklist"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("Gate 1"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("reply-current"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains(".run/artifacts/"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("inspect the host machine broadly"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("must never delete files"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains(
         "Never write the literal two-character sequence \\n when you want a line break"
     ));
 }
 
 #[test]
-fn load_system_prompt_rejects_empty_file() {
+fn load_persona_rejects_empty_file() {
     let dir = tempdir().expect("tempdir");
-    let prompt_file = dir.path().join("system_prompt.md");
-    fs::write(&prompt_file, "   \n").expect("write empty prompt");
+    let persona_file = dir.path().join("persona.md");
+    fs::write(&persona_file, "   \n").expect("write empty persona");
 
-    let error = load_system_prompt(&prompt_file).expect_err("empty prompt should fail");
+    let error = load_persona(&persona_file).expect_err("empty persona should fail");
     assert!(error.to_string().contains("empty"));
 }
 
@@ -113,7 +119,7 @@ fn runtime_config_builds_expected_paths() {
     assert_eq!(config.workspace_root, PathBuf::from("/tmp/codex-bridge"));
     assert_eq!(
         config.prompt_file,
-        PathBuf::from("/tmp/codex-bridge/.run/default/prompt/system_prompt.md")
+        PathBuf::from("/tmp/codex-bridge/.run/default/prompt/persona.md")
     );
 }
 
@@ -165,34 +171,52 @@ fn missing_thread_rollout_errors_are_detected() {
 #[test]
 fn thread_start_params_include_prompt_and_persisted_history() {
     let dir = tempdir().expect("tempdir");
-    let prompt_file = dir.path().join("system_prompt.md");
-    fs::write(&prompt_file, "prompt from file").expect("write prompt");
+    let persona_file = dir.path().join("persona.md");
+    fs::write(&persona_file, "# Persona\n\nprompt from file").expect("write persona");
     let mut config = runtime_config();
-    config.prompt_file = prompt_file;
+    config.prompt_file = persona_file;
+    config.admin_user_id = 42;
     let params = build_thread_start_params(&config, "private:123").expect("build start params");
 
     assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(params.sandbox, Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite));
     assert_eq!(params.service_name.as_deref(), Some("private:123"));
-    assert_eq!(params.developer_instructions.as_deref(), Some("prompt from file"));
     assert!(params.persist_extended_history);
+
+    let instructions = params
+        .developer_instructions
+        .as_deref()
+        .expect("developer instructions present");
+    // Layer 1: persona from file
+    assert!(instructions.contains("prompt from file"));
+    // Layer 2: bridge protocol (turn checklist is the canonical anchor)
+    assert!(instructions.contains("# Turn start checklist"));
+    assert!(instructions.contains("reply-current"));
+    // Layer 3: admin context with the configured id
+    assert!(instructions.contains("# Admin context"));
+    assert!(instructions.contains("42"));
 }
 
 #[test]
 fn thread_resume_params_reapply_current_system_prompt() {
     let dir = tempdir().expect("tempdir");
-    let prompt_file = dir.path().join("system_prompt.md");
-    fs::write(&prompt_file, "prompt from runtime file").expect("write prompt");
+    let persona_file = dir.path().join("persona.md");
+    fs::write(&persona_file, "# Persona\n\nprompt from runtime file").expect("write persona");
     let mut config = runtime_config();
-    config.prompt_file = prompt_file;
+    config.prompt_file = persona_file;
     let params = build_thread_resume_params(&config, "thread-1").expect("build resume params");
 
     assert_eq!(params.thread_id, "thread-1");
     assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
     assert_eq!(params.approvals_reviewer, Some(ApprovalsReviewer::User));
     assert_eq!(params.sandbox, Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite));
-    assert_eq!(params.developer_instructions.as_deref(), Some("prompt from runtime file"));
+    let instructions = params
+        .developer_instructions
+        .as_deref()
+        .expect("developer instructions present on resume");
+    assert!(instructions.contains("prompt from runtime file"));
+    assert!(instructions.contains("# Turn start checklist"));
     assert!(params.persist_extended_history);
 }
 

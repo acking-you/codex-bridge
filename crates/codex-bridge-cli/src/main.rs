@@ -18,6 +18,7 @@ use codex_bridge_core::{
     config::RuntimeConfig,
     launcher, napcat, orchestrator,
     outbound::ReplyRequest,
+    model_capabilities::ModelRegistry,
     reply_context::load_active_reply_context,
     runtime::{load_admin_config, RuntimePaths},
     service::ServiceState,
@@ -123,16 +124,36 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     let codex_state = state.clone();
     let store = Arc::new(Mutex::new(StateStore::open(&prepared.paths.database_path)?));
     let admin_config = load_admin_config(&prepared.paths.admin_config_file)?;
-    let codex = Arc::new(
-        CodexRuntime::new(CodexRuntimeConfig::new(
-            codex_repo_root(&project_root),
-            project_root.clone(),
-            prepared.paths.prompt_file.clone(),
-            prepared.paths.codex_child_home_dir.clone(),
-            prepared.paths.codex_home_dir.clone(),
-        ))
-        .await?,
+
+    // Wire the hot-reloadable capability pipeline:
+    //   1. Point ServiceState at the TOML file on disk so
+    //      /api/capability/reload can re-read it later.
+    //   2. Share the prompt-block Arc with the Codex runtime so updates
+    //      via set_capabilities / reload_capabilities are visible on the
+    //      next thread/start or thread/resume.
+    //   3. Load the initial registry and publish it (also rerenders the
+    //      shared prompt block atomically).
+    state.set_capabilities_file(prepared.paths.model_capabilities_file.clone());
+    let mut codex_runtime_config = CodexRuntimeConfig::new(
+        codex_repo_root(&project_root),
+        project_root.clone(),
+        prepared.paths.prompt_file.clone(),
+        prepared.paths.codex_child_home_dir.clone(),
+        prepared.paths.codex_home_dir.clone(),
     );
+    codex_runtime_config.capabilities_block = state.capabilities_prompt_block_handle();
+    codex_runtime_config.admin_user_id = admin_config.admin_user_id;
+    let initial_registry =
+        Arc::new(ModelRegistry::load_from_file(&prepared.paths.model_capabilities_file)?);
+    let initial_count = initial_registry.len();
+    state.set_capabilities(initial_registry).await;
+    info!(
+        capability_count = initial_count,
+        capabilities_file = %prepared.paths.model_capabilities_file.display(),
+        "model capability registry loaded"
+    );
+
+    let codex = Arc::new(CodexRuntime::new(codex_runtime_config).await?);
     info!("codex runtime ready");
     let orchestrator_config = orchestrator::OrchestratorConfig {
         queue_capacity: config.queue_capacity,

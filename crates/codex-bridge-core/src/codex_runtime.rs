@@ -33,14 +33,14 @@ use tracing::{info, warn};
 
 use crate::{
     approval_guard::{ApprovalDecision, ApprovalGuard},
-    system_prompt::load_system_prompt,
+    system_prompt::load_persona,
 };
 
 const DEFAULT_CLIENT_NAME: &str = "codex-bridge";
 
 /// Runtime-local configuration for launching and routing through a local
 /// app-server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CodexRuntimeConfig {
     /// Path to the Codex repository root containing the app-server workspace
     /// `Cargo.toml`.
@@ -58,6 +58,21 @@ pub struct CodexRuntimeConfig {
     pub client_name: String,
     /// Client version reported during initialize.
     pub client_version: String,
+    /// Bridge admin's QQ identifier. Consumed by
+    /// [`crate::system_prompt::render_admin_block`] to tell Codex which
+    /// id is 主人 so the persona register kicks in even when the
+    /// inbound `[主人]` marker is not present. Zero or negative means
+    /// no admin is configured.
+    pub admin_user_id: i64,
+    /// Shared, hot-reloadable "Available model capabilities" section
+    /// appended to the loaded system prompt at `thread/start` /
+    /// `thread/resume` time. The same `Arc` is held by
+    /// [`crate::service::ServiceState`] so a reload via
+    /// [`crate::service::ServiceState::reload_capabilities`] is visible
+    /// on the very next prompt build — no runtime restart required.
+    /// Existing running threads keep their embedded developer
+    /// instructions until Codex next resumes them.
+    pub capabilities_block: std::sync::Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl CodexRuntimeConfig {
@@ -77,6 +92,8 @@ impl CodexRuntimeConfig {
             codex_home_root: codex_home_root.into(),
             client_name: DEFAULT_CLIENT_NAME.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
+            admin_user_id: 0,
+            capabilities_block: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
@@ -1207,7 +1224,7 @@ pub fn build_thread_start_params(
     config: &CodexRuntimeConfig,
     conversation_key: &str,
 ) -> Result<ThreadStartParams> {
-    let prompt = load_system_prompt(&config.prompt_file)?;
+    let prompt = build_developer_instructions(config)?;
     Ok(ThreadStartParams {
         cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
         approval_policy: Some(default_approval_policy()),
@@ -1225,7 +1242,7 @@ pub fn build_thread_resume_params(
     config: &CodexRuntimeConfig,
     thread_id: &str,
 ) -> Result<ThreadResumeParams> {
-    let prompt = load_system_prompt(&config.prompt_file)?;
+    let prompt = build_developer_instructions(config)?;
     Ok(ThreadResumeParams {
         thread_id: thread_id.to_string(),
         cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
@@ -1243,6 +1260,49 @@ pub fn build_thread_compact_start_params(thread_id: &str) -> ThreadCompactStartP
     ThreadCompactStartParams {
         thread_id: thread_id.to_string(),
     }
+}
+
+/// Assemble the four-layer developer instructions handed to Codex at
+/// every `thread/start` / `thread/resume`:
+///
+/// 1. **Persona** — operator-editable identity / voice / project skills
+///    loaded from [`CodexRuntimeConfig::prompt_file`] (which points at
+///    `persona.md` since the layered refactor).
+/// 2. **Bridge protocol** — static, embedded-in-binary text covering
+///    the turn-start checklist, mention / quote / reply-to / permissions
+///    rules.
+/// 3. **Admin context** — a tiny runtime-rendered block that embeds the
+///    admin's QQ id so Codex can recognise 主人 even when the inbound
+///    `[主人]` marker is absent.
+/// 4. **Model capabilities** — the hot-reloadable "Available model
+///    capabilities" section rendered from the
+///    [`crate::model_capabilities::ModelRegistry`], when non-empty.
+fn build_developer_instructions(config: &CodexRuntimeConfig) -> Result<String> {
+    let persona = load_persona(&config.prompt_file)?;
+    let bridge = crate::system_prompt::BRIDGE_PROTOCOL_TEXT;
+    let admin = crate::system_prompt::render_admin_block(config.admin_user_id);
+
+    let capabilities_block = match config.capabilities_block.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => {
+            tracing::warn!("capabilities_block lock poisoned; ignoring");
+            poisoned.into_inner().clone()
+        },
+    };
+
+    let mut layers: Vec<String> = vec![
+        persona.trim().to_string(),
+        bridge.trim().to_string(),
+        admin.trim().to_string(),
+    ];
+    if let Some(block) = capabilities_block {
+        let trimmed = block.trim();
+        if !trimmed.is_empty() {
+            layers.push(trimmed.to_string());
+        }
+    }
+
+    Ok(layers.join("\n\n") + "\n")
 }
 
 fn discover_project_skills(workspace_root: &Path) -> Result<Vec<UserInput>> {

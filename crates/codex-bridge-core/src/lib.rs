@@ -56,3 +56,11 @@ pub mod codex_runtime;
 
 /// Orchestrator runtime that connects routing and codex execution.
 pub mod orchestrator;
+
+/// Abstract model-capability trait used to augment Codex with one-shot
+/// calls against other models (Claude, Gemini, ...).
+pub mod model_capability;
+
+/// Registered [`model_capability::ModelCapability`] implementations and
+/// their TOML loader.
+pub mod model_capabilities;

@@ -22,7 +22,7 @@ fn default_runtime_paths_live_under_project_run_dir() {
     assert_eq!(paths.runtime_root, project_root.join(".run/default"));
     assert_eq!(paths.artifacts_dir, project_root.join(".run/artifacts"));
     assert_eq!(paths.prompt_dir, project_root.join(".run/default/prompt"));
-    assert_eq!(paths.prompt_file, project_root.join(".run/default/prompt/system_prompt.md"));
+    assert_eq!(paths.prompt_file, project_root.join(".run/default/prompt/persona.md"));
     assert_eq!(paths.admin_config_file, project_root.join(".run/default/config/admin.toml"));
     assert_eq!(paths.database_path, project_root.join(".run/default/state.sqlite3"));
     assert_eq!(paths.launcher_env, project_root.join(".run/default/run/launcher.env"));
@@ -79,7 +79,8 @@ fn prepare_runtime_state_creates_artifacts_dir() {
     let launcher_env = fs::read_to_string(&paths.launcher_env).unwrap();
     assert!(launcher_env.contains("WEBUI_TOKEN=webui"));
     let prompt = fs::read_to_string(&paths.prompt_file).unwrap();
-    assert!(prompt.contains("reply-current"));
+    assert!(prompt.contains("# Identity"));
+    assert!(prompt.contains("# Voice and vitality"));
     let admin_config = fs::read_to_string(&paths.admin_config_file).unwrap();
     assert!(admin_config.contains("admin_user_id = 2394626220"));
 }

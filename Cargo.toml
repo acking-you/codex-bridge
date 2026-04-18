@@ -18,6 +18,7 @@ sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.28"
+toml = "0.8"
 rusqlite = { version = "0.33", features = ["bundled"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"

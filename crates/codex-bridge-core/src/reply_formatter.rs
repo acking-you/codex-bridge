@@ -2,94 +2,94 @@ use crate::{admin_approval::PendingApproval, scheduler::TaskSummary, state_store
 
 /// Return the persona-consistent private-chat ack for started tasks.
 pub fn format_started_private() -> String {
-    "欸、我先去看一下……稍等我一下。".to_string()
+    "欸、我先去看一下……稍等我一下喔～(ง •̀_•́)ง".to_string()
 }
 
 /// Return queue position message for an enqueued task.
 pub fn format_enqueued(position: usize) -> String {
-    format!("先排一下队……现在前面还有 {position} 个。")
+    format!("先排一下队嘛……前面还有 {position} 个呢 _(:3」∠)_")
 }
 
 /// Return queue-capacity denial message.
 pub fn format_queue_full() -> String {
-    "现在脑内线程真的满了……等我清一清再来吧。".to_string()
+    "呜、现在脑内线程真的满了……等我清一清再来嘛～(╥﹏╥)".to_string()
 }
 
 /// Return failure response including cause.
 pub fn format_failure(message: &str) -> String {
-    format!("欸，刚才那步翻车了。\n原因：{message}")
+    format!("欸……刚才那步翻车了 (´；ω；`)\n原因：{message}")
 }
 
 /// Return the help text describing trigger rules and local commands.
 pub fn format_help() -> String {
-    "触发方式：私聊默认触发，但非好友不会接入；群里需要先 \
-     @我。管理员可在私聊或群里 @我 使用管理命令，群聊非管理员任务仍需管理员确认。\n命令：/help /status /queue /cancel \
-     /retry_last /clear /compact /approve <task_id> /deny \
-     <task_id>\n权限：全机可读，仅当前仓库可写，新文件只会写到 .run/artifacts/，危险操作会被拒绝。"
+    "触发方式：私聊默认会进来，但不是好友的私聊我接不到喔；群里要先 @我 才行。\
+     主人在私聊或群里 @我 就能用管理命令；群聊里其他人发起的任务仍然要等主人点头。\n\
+     命令：/help /status /queue /cancel /retry_last /clear /compact /approve <task_id> /deny \
+     <task_id>\n权限：全机可读，仅当前仓库可写，新文件只写到 .run/artifacts/，危险操作会被拒绝 _(:3」∠)_"
         .to_string()
 }
 
 /// Return the message shown when the caller must wait for admin approval.
 pub fn format_waiting_for_admin_approval() -> String {
-    "这件事要先得到管理员点头……等他确认下来，我再继续。".to_string()
+    "这件事要先等主人点头……等主人确认下来，我再继续呀 (´・ω・`)".to_string()
 }
 
 /// Return the message shown when a group request must wait for a salute
 /// reaction.
 pub fn format_waiting_for_admin_group_approval() -> String {
-    "这件事要先等管理员点头……请他对原消息点个敬礼表情。".to_string()
+    "这件事要先等主人点头……请主人对原消息点个敬礼的表情嘛 (｡•ㅅ•｡)".to_string()
 }
 
 /// Return the message shown when one conversation is already waiting for
 /// approval.
 pub fn format_waiting_for_admin_approval_duplicate() -> String {
-    "这段会话已经有一条在等管理员确认了，先别一下子塞太多给我……".to_string()
+    "这段会话已经有一条在等主人确认了，先别一下子塞太多给我嘛……(＞ω＜)".to_string()
 }
 
 /// Return the message shown when a non-admin user attempts an admin-only
 /// command.
 pub fn format_admin_only_command() -> String {
-    "这个命令只开放给管理员。".to_string()
+    "这个命令只开放给主人……抱歉呐 (´・ω・`)".to_string()
 }
 
 /// Return the message shown when current conversation context is cleared.
 pub fn format_clear_success() -> String {
-    "当前会话上下文已清空；下次会从新线程开始。".to_string()
+    "当前会话的上下文清空啦～下次从新线程开始喔 (๑•̀ㅂ•́)و✧".to_string()
 }
 
 /// Return the message shown when there is no current conversation context.
 pub fn format_clear_missing() -> String {
-    "当前会话没有可清空的上下文。".to_string()
+    "当前会话没有可以清空的上下文呐 (´・ω・`)".to_string()
 }
 
 /// Return the message shown when compaction is started.
 pub fn format_compact_started() -> String {
-    "已发起当前会话的上下文压缩。".to_string()
+    "已经发起当前会话的上下文压缩啦 _(:3」∠)_".to_string()
 }
 
 /// Return the message shown when there is no thread to compact.
 pub fn format_compact_missing() -> String {
-    "当前会话还没有可压缩的上下文。".to_string()
+    "当前会话还没有可压缩的上下文呐～".to_string()
 }
 
 /// Return the message shown when current conversation is busy.
 pub fn format_compact_busy() -> String {
-    "当前会话正在执行任务；先等它结束，或先 /cancel。".to_string()
+    "当前会话正在跑任务呢；先等它结束，或者 /cancel 停掉 (＞ω＜)".to_string()
 }
 
 /// Return the message shown when compaction failed unexpectedly.
 pub fn format_compact_failed() -> String {
-    "上下文压缩没成功，稍后再试一次，或先 /clear 再重开对话。".to_string()
+    "唔……上下文压缩没成功，稍后再试一次嘛，或者先 /clear 再重开对话 (╥﹏╥)".to_string()
 }
 
 /// Return the message shown when a waiting task is denied.
 pub fn format_approval_denied() -> String {
-    "管理员这次没有点头，所以这条请求我先不执行。".to_string()
+    "主人这次没有点头，所以这条请求我先不执行啦 (´・ω・`)".to_string()
 }
 
 /// Return the message shown when a waiting task expires.
 pub fn format_approval_expired() -> String {
-    "这条请求等管理员确认等太久了，已经自动作废。".to_string()
+    "这条请求等主人确认等太久了，已经自动作废呐……(╥﹏╥)".to_string()
 }
 
 /// Render the admin-facing approval notice for one pending task.
@@ -135,23 +135,23 @@ pub fn format_admin_status_command(task_id: &str) -> String {
 
 /// Render the admin-facing result after approving a task.
 pub fn format_admin_approved(task_id: &str) -> String {
-    format!("已批准任务：{task_id}")
+    format!("任务已批准啦～{task_id} ✨")
 }
 
 /// Render the admin-facing message when a group pending task must use
 /// reaction approval.
 pub fn format_group_approval_use_reaction() -> String {
-    "群聊待审批任务不能用 /approve；请对原群消息点敬礼表情。".to_string()
+    "群聊待审批任务不能用 /approve 呀，要对原群消息点个敬礼表情才行喔～".to_string()
 }
 
 /// Render the admin-facing result after denying a task.
 pub fn format_admin_denied(task_id: &str) -> String {
-    format!("已拒绝任务：{task_id}")
+    format!("任务已拒绝：{task_id}")
 }
 
 /// Render the admin-facing message when one task id cannot be found.
 pub fn format_admin_task_not_found(task_id: &str) -> String {
-    format!("没有找到任务：{task_id}")
+    format!("没有找到这个任务呐：{task_id} (´・ω・`)")
 }
 
 /// Render the admin-facing status view for a persisted task.
@@ -172,35 +172,35 @@ pub fn format_task_status(task: &TaskRecord, recent_output: &[String]) -> String
 
 /// Return the private gate message for non-friends.
 pub fn format_friend_gate() -> String {
-    "那个……先加个好友吧。没加好友的私聊这边不会直接接入。".to_string()
+    "那个……先加个好友嘛，不是好友的私聊这边接不进来呐 (´・ω・`)".to_string()
 }
 
 /// Return the fallback message when a turn finishes without any reply skill
 /// output.
 pub fn format_missing_skill_reply() -> String {
-    "已经处理完了，但这次没有生成可回传的结果。".to_string()
+    "已经处理完了，但这次没有生成可以回传的结果呐……(´-ω-`)".to_string()
 }
 
 /// Return the message shown when cancel is requested successfully.
 pub fn format_cancel_requested() -> String {
-    "收到，我去把这条任务拦下来……等它停住。".to_string()
+    "收到～我去把这条任务拦下来，等它停住 (ง •̀_•́)ง".to_string()
 }
 
 /// Return the message shown when a cancel command could not interrupt the
 /// running turn (for example when Codex restarted and lost the turn state).
 pub fn format_cancel_failed() -> String {
-    "取消失败，稍后再试；仍然卡住时可以 /clear 再重开对话。".to_string()
+    "取消失败了……稍后再试一次嘛；要是还卡住，可以 /clear 再重开对话 (╥﹏╥)".to_string()
 }
 
 /// Return the message shown when the caller tries to cancel another user's
 /// task.
 pub fn format_cancel_denied() -> String {
-    "这条任务不是你发起的，我不能替你按停。".to_string()
+    "这条任务不是你发起的呐，我不能替你按停 (´・ω・`)".to_string()
 }
 
 /// Return the message shown when the caller has no retryable task in context.
 pub fn format_retry_missing() -> String {
-    "当前会话里没有你可以重试的失败任务。".to_string()
+    "当前会话里没有你可以重试的失败任务呢～".to_string()
 }
 
 /// Return `/status` style task summary lines.

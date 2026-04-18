@@ -678,6 +678,21 @@ async fn private_sender_is_friend(state: &ServiceState, task: &TaskRequest) -> b
 /// agent can still see that something was quoted.
 const QUOTED_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Prepend a literal `[主人]` marker on its own line to the task's
+/// `source_text` when the sender is the configured admin. The marker
+/// gives Codex a deterministic signal to switch into the "主人" register
+/// without leaking the admin's QQ id into the conversation.
+///
+/// A zero or negative `admin_user_id` means no admin is configured; the
+/// task passes through untouched.
+fn enrich_task_with_admin_marker(mut task: TaskRequest, admin_user_id: i64) -> TaskRequest {
+    if admin_user_id <= 0 || task.source_sender_id != admin_user_id {
+        return task;
+    }
+    task.source_text = format!("[主人]\n{}", task.source_text);
+    task
+}
+
 /// When `task.quoted_message_id` is set, fetch the referenced message via
 /// OneBot `get_msg` and prepend a structured marker block to `source_text`
 /// so the agent has the quoted conversation in plain sight.
@@ -1537,6 +1552,8 @@ pub async fn run(
                                     }
                                 },
                                 RouteDecision::Task(task) => {
+                                    let task =
+                                        enrich_task_with_admin_marker(task, config.admin_user_id);
                                     let task = enrich_task_with_quoted_context(task, &state).await;
                                     if !task.is_group
                                         && !is_admin_task(&task, config.admin_user_id)
@@ -1787,5 +1804,52 @@ pub async fn send_reply_best_effort(
             target_id,
             "reply send failed, continuing: {error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod admin_marker_tests {
+    use super::{enrich_task_with_admin_marker, TaskRequest};
+
+    fn sample_task(source_sender_id: i64) -> TaskRequest {
+        TaskRequest {
+            conversation_key: "private:1".into(),
+            source_message_id: 1,
+            source_sender_id,
+            source_sender_name: "tester".into(),
+            source_text: "@<bot> 你好".into(),
+            is_group: false,
+            reply_target_id: source_sender_id,
+            self_id: 99,
+            quoted_message_id: None,
+        }
+    }
+
+    #[test]
+    fn prepends_marker_when_sender_matches_admin() {
+        let task = sample_task(123456);
+        let out = enrich_task_with_admin_marker(task, 123456);
+        assert_eq!(out.source_text, "[主人]\n@<bot> 你好");
+    }
+
+    #[test]
+    fn leaves_text_untouched_when_sender_is_not_admin() {
+        let task = sample_task(99999);
+        let out = enrich_task_with_admin_marker(task, 123456);
+        assert_eq!(out.source_text, "@<bot> 你好");
+    }
+
+    #[test]
+    fn no_admin_configured_is_passthrough() {
+        let task = sample_task(123456);
+        let out = enrich_task_with_admin_marker(task, 0);
+        assert_eq!(out.source_text, "@<bot> 你好");
+    }
+
+    #[test]
+    fn negative_admin_id_is_treated_as_unset() {
+        let task = sample_task(123456);
+        let out = enrich_task_with_admin_marker(task, -1);
+        assert_eq!(out.source_text, "@<bot> 你好");
     }
 }

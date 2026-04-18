@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     admin_approval::{default_admin_config_template, AdminConfig},
     config::RuntimeConfig,
-    system_prompt::ensure_prompt_file,
+    system_prompt::ensure_persona_file,
 };
 
 /// Generated tokens written into runtime state files.
@@ -41,6 +41,13 @@ pub struct RuntimePaths {
     pub config_dir: PathBuf,
     /// Runtime-owned admin approval config file.
     pub admin_config_file: PathBuf,
+    /// Runtime-owned model capabilities config file (loaded into the
+    /// [`crate::model_capabilities::ModelRegistry`] on boot).
+    pub model_capabilities_file: PathBuf,
+    /// Example / template counterpart of
+    /// [`Self::model_capabilities_file`], seeded on first boot so the
+    /// operator knows which keys the real file can declare.
+    pub model_capabilities_example_file: PathBuf,
     /// Runtime log directory.
     pub logs_dir: PathBuf,
     /// Runtime cache directory.
@@ -104,10 +111,13 @@ impl RuntimePaths {
             artifacts_dir: project_root.join(".run/artifacts"),
             config_dir: runtime_root.join("config"),
             admin_config_file: runtime_root.join("config/admin.toml"),
+            model_capabilities_file: runtime_root.join("config/model_capabilities.toml"),
+            model_capabilities_example_file: runtime_root
+                .join("config/model_capabilities.toml.example"),
             logs_dir: runtime_root.join("logs"),
             cache_dir: runtime_root.join("cache"),
             prompt_dir: runtime_root.join("prompt"),
-            prompt_file: runtime_root.join("prompt/system_prompt.md"),
+            prompt_file: runtime_root.join("prompt/persona.md"),
             database_path: runtime_root.join("state.sqlite3"),
             launcher_env: run_dir.join("launcher.env"),
             reply_context_file: run_dir.join("reply_context.json"),
@@ -155,8 +165,10 @@ where
         fs::create_dir_all(parent)?;
     }
     ensure_skills_symlink(paths)?;
-    ensure_prompt_file(&paths.prompt_file)?;
+    ensure_persona_file(&paths.prompt_file)?;
+    warn_about_legacy_system_prompt(paths);
     ensure_admin_config_file(&paths.admin_config_file)?;
+    ensure_model_capabilities_example(&paths.model_capabilities_example_file)?;
     let _admin_config = AdminConfig::from_file(&paths.admin_config_file)?;
     sync_codex_config(paths)?;
     seed_codex_auth(paths)?;
@@ -264,6 +276,44 @@ fn ensure_admin_config_file(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, default_admin_config_template())?;
+    Ok(())
+}
+
+/// Log a one-shot warning when a legacy monolithic `system_prompt.md`
+/// is still sitting next to the new `persona.md`. Earlier versions of
+/// the bridge stored the full prompt (identity + bridge protocol +
+/// permissions + ...) in one file; since the layered refactor, only
+/// `persona.md` is read and the bridge protocol / admin context /
+/// capabilities sections are assembled in code. The legacy file is
+/// harmless but misleading — operators should delete it once they
+/// confirm the new persona file behaves correctly.
+fn warn_about_legacy_system_prompt(paths: &RuntimePaths) {
+    let legacy = paths.prompt_dir.join("system_prompt.md");
+    if legacy.is_file() {
+        tracing::warn!(
+            legacy_file = %legacy.display(),
+            active_file = %paths.prompt_file.display(),
+            "legacy monolithic system_prompt.md is no longer read; edit persona.md instead \
+             and delete the legacy file to stop seeing this warning",
+        );
+    }
+}
+
+/// Default template shipped as `model_capabilities.toml.example`. The
+/// real `model_capabilities.toml` is created by the operator by copying
+/// the example and filling in the api_key — it is gitignored.
+const DEFAULT_MODEL_CAPABILITIES_TEMPLATE: &str = include_str!(
+    "../assets/model_capabilities.toml.example"
+);
+
+fn ensure_model_capabilities_example(path: &Path) -> Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, DEFAULT_MODEL_CAPABILITIES_TEMPLATE)?;
     Ok(())
 }
 

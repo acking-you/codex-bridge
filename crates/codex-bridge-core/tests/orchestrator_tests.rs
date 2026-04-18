@@ -16,6 +16,7 @@ use codex_bridge_core::{
     orchestrator::{
         self, handle_route_decision, handle_route_decision_with_store, OrchestratorConfig,
     },
+    reply_formatter,
     scheduler::Scheduler,
     service::{FriendProfile, SendMessageReceipt, ServiceCommand, ServiceState},
     state_store::{ConversationBinding, StateStore, TaskStatus},
@@ -415,10 +416,11 @@ fn spawn_bridge_sink(
 
 fn runtime_config(repo_root: &std::path::Path) -> OrchestratorConfig {
     let artifacts_dir = repo_root.join(".run/artifacts");
-    let prompt_file = repo_root.join(".run/default/prompt/system_prompt.md");
+    let prompt_file = repo_root.join(".run/default/prompt/persona.md");
     std::fs::create_dir_all(&artifacts_dir).expect("create artifacts dir");
     std::fs::create_dir_all(prompt_file.parent().expect("prompt dir")).expect("create prompt dir");
-    std::fs::write(&prompt_file, "prompt from test runtime").expect("write prompt file");
+    std::fs::write(&prompt_file, "# Test persona\n\nprompt from test runtime")
+        .expect("write persona file");
     OrchestratorConfig {
         queue_capacity: 5,
         repo_root: repo_root.to_path_buf(),
@@ -465,7 +467,7 @@ async fn task_request_sends_started_and_final_reply() {
         .expect("handle task");
 
     let sent = replies.messages();
-    assert_eq!(sent[0], "欸、我先去看一下……稍等我一下。");
+    assert_eq!(sent[0], reply_formatter::format_started_private());
     assert_eq!(sent[1], "已经处理完成");
 }
 
@@ -631,10 +633,10 @@ async fn cancel_command_interrupts_active_turn() {
     let messages = sent_messages.lock().expect("messages").clone();
     assert!(messages
         .iter()
-        .any(|text| text == "欸、我先去看一下……稍等我一下。"));
+        .any(|text| text == &reply_formatter::format_started_private()));
     assert!(messages
         .iter()
-        .any(|text| text == "收到，我去把这条任务拦下来……等它停住。"));
+        .any(|text| text == &reply_formatter::format_cancel_requested()));
 
     run_handle.abort();
     bridge_handle.abort();
@@ -671,7 +673,7 @@ async fn non_friend_private_message_is_rejected_before_codex() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text == "那个……先加个好友吧。没加好友的私聊这边不会直接接入。")
+                .any(|text| text == &reply_formatter::format_friend_gate())
             {
                 break;
             }
@@ -750,7 +752,7 @@ async fn non_admin_group_message_is_approved_by_admin_salute_reaction() {
             if messages.iter().any(|text| text == "REACTION:5001:282")
                 && messages
                     .iter()
-                    .any(|text| text == "已经处理完了，但这次没有生成可回传的结果。")
+                    .any(|text| text == &reply_formatter::format_missing_skill_reply())
             {
                 break;
             }
@@ -937,7 +939,7 @@ async fn admin_group_message_bypasses_approval() {
             if messages.iter().any(|text| text == "REACTION:5002:282")
                 && messages
                     .iter()
-                    .any(|text| text == "已经处理完了，但这次没有生成可回传的结果。")
+                    .any(|text| text == &reply_formatter::format_missing_skill_reply())
             {
                 break;
             }
@@ -1056,7 +1058,7 @@ async fn non_admin_group_status_command_is_rejected() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text == "这个命令只开放给管理员。")
+                .any(|text| text == &reply_formatter::format_admin_only_command())
             {
                 break;
             }
@@ -1106,7 +1108,7 @@ async fn compact_command_without_binding_reports_missing_context() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text.contains("没有可压缩的上下文"))
+                .any(|text| text == &reply_formatter::format_compact_missing())
             {
                 break;
             }
@@ -1169,7 +1171,7 @@ async fn clear_command_removes_current_conversation_binding_and_next_turn_uses_n
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text.contains("上下文已清空"))
+                .any(|text| text == &reply_formatter::format_clear_success())
             {
                 break;
             }
@@ -1258,7 +1260,7 @@ async fn compact_command_starts_thread_compaction_when_idle() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text.contains("已发起当前会话的上下文压缩"))
+                .any(|text| text == &reply_formatter::format_compact_started())
             {
                 break;
             }
@@ -1342,7 +1344,7 @@ async fn compact_command_for_running_conversation_reports_busy() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text.contains("当前会话正在执行任务"))
+                .any(|text| text == &reply_formatter::format_compact_busy())
             {
                 break;
             }
@@ -1402,7 +1404,7 @@ async fn non_admin_friend_private_message_waits_for_admin_approval() {
             let messages = sent_messages.lock().expect("messages").clone();
             if messages
                 .iter()
-                .any(|text| text == "这件事要先得到管理员点头……等他确认下来，我再继续。")
+                .any(|text| text == &reply_formatter::format_waiting_for_admin_approval())
                 && messages.iter().any(|text| text.contains("待审批任务："))
             {
                 break;
@@ -1447,7 +1449,7 @@ async fn non_admin_friend_private_message_waits_for_admin_approval() {
                     .lock()
                     .expect("messages")
                     .iter()
-                    .any(|text| text == "已经处理完了，但这次没有生成可回传的结果。")
+                    .any(|text| text == &reply_formatter::format_missing_skill_reply())
             {
                 break;
             }
@@ -1589,7 +1591,7 @@ async fn duplicate_pending_approval_from_same_conversation_is_rejected() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text == "这段会话已经有一条在等管理员确认了，先别一下子塞太多给我……")
+                .any(|text| text == &reply_formatter::format_waiting_for_admin_approval_duplicate())
             {
                 break;
             }
@@ -1642,7 +1644,7 @@ async fn pending_approval_expires_without_admin_reply() {
                 .lock()
                 .expect("messages")
                 .iter()
-                .any(|text| text == "这条请求等管理员确认等太久了，已经自动作废。")
+                .any(|text| text == &reply_formatter::format_approval_expired())
             {
                 break;
             }
