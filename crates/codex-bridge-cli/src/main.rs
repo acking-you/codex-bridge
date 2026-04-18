@@ -14,13 +14,12 @@ use codex_bridge_cli::{
 };
 use codex_bridge_core::{
     api,
-    codex_runtime::{CodexRuntime, CodexRuntimeConfig},
+    codex_runtime::CodexRuntimeConfig,
     config::RuntimeConfig,
     launcher, napcat, orchestrator,
-    outbound::ReplyRequest,
     model_capabilities::ModelRegistry,
-    reply_context::load_active_reply_context,
-    runtime::{load_admin_config, RuntimePaths},
+    runtime_pool::RuntimePool,
+    runtime::load_admin_config,
     service::ServiceState,
     state_store::StateStore,
 };
@@ -100,10 +99,10 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     );
     let (command_tx, command_rx) = mpsc::channel(64);
     let (control_tx, control_rx) = mpsc::channel(64);
-    let state = ServiceState::with_control_and_reply_context(
+    let state = ServiceState::with_control_and_reply_context_paths(
         command_tx,
         control_tx,
-        prepared.paths.reply_context_file.clone(),
+        prepared.paths.reply_contexts_dir.clone(),
     );
 
     let api_bind = config.api_bind.clone();
@@ -143,6 +142,7 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     );
     codex_runtime_config.capabilities_block = state.capabilities_prompt_block_handle();
     codex_runtime_config.admin_user_id = admin_config.admin_user_id;
+    codex_runtime_config.reply_contexts_dir = prepared.paths.reply_contexts_dir.clone();
     let initial_registry =
         Arc::new(ModelRegistry::load_from_file(&prepared.paths.model_capabilities_file)?);
     let initial_count = initial_registry.len();
@@ -153,15 +153,25 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
         "model capability registry loaded"
     );
 
-    let codex = Arc::new(CodexRuntime::new(codex_runtime_config).await?);
-    info!("codex runtime ready");
+    let codex = Arc::new(
+        RuntimePool::spawn_from_config(
+            &codex_runtime_config,
+            &prepared.paths.runtime_root,
+            config.runtime_pool_size,
+        )
+        .await?,
+    );
+    info!(runtime_pool_size = config.runtime_pool_size, "codex runtime pool ready");
     let orchestrator_config = orchestrator::OrchestratorConfig {
         queue_capacity: config.queue_capacity,
+        lane_pending_capacity: config.lane_pending_capacity,
+        runtime_pool_size: config.runtime_pool_size,
         repo_root: project_root.clone(),
         artifacts_dir: prepared.paths.artifacts_dir.clone(),
         prompt_file: prepared.paths.prompt_file.clone(),
         group_start_reaction_emoji_id: config.group_start_reaction_emoji_id.clone(),
         admin_user_id: admin_config.admin_user_id,
+        trusted_group_ids: admin_config.trusted_group_ids.clone(),
         pending_approval_capacity: config.pending_approval_capacity,
         approval_timeout_secs: config.approval_timeout_secs,
     };
@@ -297,23 +307,13 @@ async fn orchestrator_supervisor(
 }
 
 async fn reply_command(
-    config: &RuntimeConfig,
-    project_root: &Path,
-    text: Option<String>,
-    image: Option<PathBuf>,
-    file: Option<PathBuf>,
+    _config: &RuntimeConfig,
+    _project_root: &Path,
+    _text: Option<String>,
+    _image: Option<PathBuf>,
+    _file: Option<PathBuf>,
 ) -> Result<()> {
-    let paths = RuntimePaths::new(project_root, Option::<PathBuf>::None);
-    let context = load_active_reply_context(&paths.reply_context_file)?;
-    let payload = ReplyRequest {
-        token: context.token,
-        text,
-        image,
-        file,
-        at: vec![],
-        reply_to: None,
-    };
-    post_local_json(config, "/api/reply", serde_json::to_value(payload)?)
-        .await
-        .map(|_| ())
+    anyhow::bail!(
+        "codex-bridge reply no longer infers a singleton reply context; use the reply-current skill with --context-file"
+    )
 }

@@ -32,48 +32,57 @@ pub struct ActiveReplyContext {
     pub artifacts_dir: PathBuf,
 }
 
-/// Registry holding zero or more concurrently active reply contexts. The
-/// on-disk mirror file always shows the most recently activated context so
-/// legacy skills that read the singleton path keep working when only one
-/// task is in flight.
+/// Registry holding zero or more concurrently active reply contexts.
+///
+/// Each active context is persisted only to its deterministic
+/// per-conversation file at `contexts_dir/<sanitized_key>.json`. There is no
+/// singleton mirror file because it is inherently racy under concurrent tasks
+/// from different conversations.
 #[derive(Debug)]
 pub struct ReplyRegistry {
-    context_file: PathBuf,
+    contexts_dir: PathBuf,
     /// Active reply states keyed by their unique token.
     active: HashMap<String, ActiveReplyState>,
-    /// Token of the context that is currently mirrored to the singleton file.
-    mirrored_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct ActiveReplyState {
     context: ActiveReplyContext,
     send_count: usize,
+    per_conversation_file: PathBuf,
 }
 
 impl ReplyRegistry {
-    /// Create a registry backed by the given JSON file.
-    pub fn new(context_file: PathBuf) -> Self {
+    /// Create a registry backed by the per-conversation directory. Paths are
+    /// created on demand when contexts are activated.
+    pub fn new(contexts_dir: PathBuf) -> Self {
         Self {
-            context_file,
+            contexts_dir,
             active: HashMap::new(),
-            mirrored_token: None,
         }
     }
 
-    /// Activate a new reply context (allowing multiple to coexist) and
-    /// mirror it as the most recently activated one to disk.
+    /// Activate a new reply context by writing the lane-scoped
+    /// per-conversation file keyed on `conversation_key`.
     pub fn activate(&mut self, context: ActiveReplyContext) -> Result<()> {
         let token = context.token.clone();
+        let per_conversation_file =
+            reply_context_file_for(&self.contexts_dir, &context.conversation_key);
+        write_context_to_file(&per_conversation_file, &context).with_context(|| {
+            format!(
+                "write per-conversation reply context {}",
+                per_conversation_file.display()
+            )
+        })?;
         self.active.insert(
             token.clone(),
             ActiveReplyState {
                 context,
                 send_count: 0,
+                per_conversation_file,
             },
         );
-        self.mirrored_token = Some(token);
-        self.persist()
+        Ok(())
     }
 
     /// Resolve a reply token into its currently active context.
@@ -82,14 +91,6 @@ impl ReplyRegistry {
             Some(state) => Ok(state.context.clone()),
             None => bail!("reply token is not active"),
         }
-    }
-
-    /// Return the most recently activated context, if any.
-    pub fn current(&self) -> Option<ActiveReplyContext> {
-        self.mirrored_token
-            .as_ref()
-            .and_then(|token| self.active.get(token))
-            .map(|state| state.context.clone())
     }
 
     /// Mark one successful skill-driven reply send against the given token.
@@ -106,49 +107,138 @@ impl ReplyRegistry {
         self.active.get(token).map(|state| state.send_count).unwrap_or(0)
     }
 
-    /// Revoke a single reply context by token. The mirror file is updated to
-    /// point at any other still-active context, or removed when none remain.
+    /// Revoke a single reply context by token. Removes the matching
+    /// per-conversation file.
     pub fn deactivate(&mut self, token: &str) -> Result<()> {
-        self.active.remove(token);
-        if self.mirrored_token.as_deref() == Some(token) {
-            self.mirrored_token = self.active.keys().next().cloned();
+        if let Some(state) = self.active.remove(token) {
+            if state.per_conversation_file.exists() {
+                fs::remove_file(&state.per_conversation_file).with_context(|| {
+                    format!(
+                        "remove per-conversation reply context {}",
+                        state.per_conversation_file.display()
+                    )
+                })?;
+            }
         }
-        self.persist()
-    }
-
-    fn persist(&self) -> Result<()> {
-        if let Some(parent) = self.context_file.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create reply context directory {}", parent.display()))?;
-        }
-
-        let mirrored = self
-            .mirrored_token
-            .as_ref()
-            .and_then(|token| self.active.get(token));
-
-        match mirrored {
-            Some(state) => {
-                let payload =
-                    serde_json::to_vec_pretty(&state.context).context("serialize reply context")?;
-                fs::write(&self.context_file, payload)
-                    .with_context(|| format!("write {}", self.context_file.display()))?;
-            },
-            None => {
-                if self.context_file.exists() {
-                    fs::remove_file(&self.context_file)
-                        .with_context(|| format!("remove {}", self.context_file.display()))?;
-                }
-            },
-        }
-
         Ok(())
     }
 }
 
-/// Load the active reply context from the runtime mirror file.
+/// Compute the deterministic per-conversation reply-context filename.
+///
+/// Conversation keys carry a `:` separator (e.g. `group:123`,
+/// `private:456`) that is not safe everywhere on disk, so `:` becomes
+/// `_`; other characters are kept verbatim since they're always ASCII
+/// alphanumeric under the current routing convention.
+pub fn reply_context_file_for(contexts_dir: &Path, conversation_key: &str) -> PathBuf {
+    let sanitized = conversation_key.replace(':', "_");
+    contexts_dir.join(format!("{sanitized}.json"))
+}
+
+fn write_context_to_file(path: &Path, context: &ActiveReplyContext) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create reply context directory {}", parent.display()))?;
+    }
+    let payload = serde_json::to_vec_pretty(context).context("serialize reply context")?;
+    fs::write(path, payload).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Load the active reply context from one per-conversation context JSON file.
 pub fn load_active_reply_context(path: impl AsRef<Path>) -> Result<ActiveReplyContext> {
     let path = path.as_ref();
     let raw = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_slice(&raw).context("decode reply context")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_context(token: &str, conversation_key: &str) -> ActiveReplyContext {
+        ActiveReplyContext {
+            token: token.into(),
+            conversation_key: conversation_key.into(),
+            is_group: conversation_key.starts_with("group:"),
+            reply_target_id: 1,
+            source_message_id: 1,
+            source_sender_id: 1,
+            source_sender_name: "tester".into(),
+            repo_root: PathBuf::from("/tmp"),
+            artifacts_dir: PathBuf::from("/tmp"),
+        }
+    }
+
+    #[test]
+    fn filename_sanitizes_conversation_key_separator() {
+        let dir = Path::new("/tmp/contexts");
+        assert_eq!(
+            reply_context_file_for(dir, "group:111"),
+            dir.join("group_111.json")
+        );
+        assert_eq!(
+            reply_context_file_for(dir, "private:222"),
+            dir.join("private_222.json")
+        );
+    }
+
+    #[test]
+    fn activate_writes_one_per_conversation_file() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let contexts = tmp.path().join("contexts");
+        let mut registry = ReplyRegistry::new(contexts.clone());
+
+        registry
+            .activate(sample_context("token-a", "group:111"))
+            .expect("activate a");
+
+        assert!(contexts.join("group_111.json").is_file());
+    }
+
+    #[test]
+    fn concurrent_activations_keep_distinct_per_conversation_files() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let contexts = tmp.path().join("contexts");
+        let mut registry = ReplyRegistry::new(contexts.clone());
+
+        registry
+            .activate(sample_context("token-a", "group:111"))
+            .expect("activate a");
+        registry
+            .activate(sample_context("token-b", "group:222"))
+            .expect("activate b");
+
+        let file_a = contexts.join("group_111.json");
+        let file_b = contexts.join("group_222.json");
+        assert!(file_a.is_file());
+        assert!(file_b.is_file());
+
+        let ctx_a = load_active_reply_context(&file_a).expect("read a");
+        let ctx_b = load_active_reply_context(&file_b).expect("read b");
+        assert_eq!(ctx_a.token, "token-a");
+        assert_eq!(ctx_a.conversation_key, "group:111");
+        assert_eq!(ctx_b.token, "token-b");
+        assert_eq!(ctx_b.conversation_key, "group:222");
+    }
+
+    #[test]
+    fn deactivate_removes_only_its_own_per_conversation_file() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let contexts = tmp.path().join("contexts");
+        let mut registry = ReplyRegistry::new(contexts.clone());
+
+        registry
+            .activate(sample_context("token-a", "group:111"))
+            .expect("activate a");
+        registry
+            .activate(sample_context("token-b", "group:222"))
+            .expect("activate b");
+
+        registry.deactivate("token-a").expect("deactivate a");
+
+        assert!(!contexts.join("group_111.json").exists());
+        assert!(contexts.join("group_222.json").is_file());
+    }
 }

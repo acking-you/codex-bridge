@@ -15,10 +15,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::{
+    conversation_history::{HistoryQuery, HistoryQueryResult},
+    lane_manager::{LaneRuntimeState, RuntimeSnapshot},
     message_router::{CommandRequest, ControlCommand},
     model_capability::{CapabilityInput, CapabilityOutput},
     outbound::{build_outbound_message, ReplyRequest},
-    service::{SendMessageReceipt, ServiceState, TaskSnapshot},
+    service::{SendMessageReceipt, ServiceState},
 };
 
 /// Build the local API router for the bridge runtime.
@@ -33,6 +35,7 @@ pub fn build_router(state: ServiceState) -> Router {
         .route("/api/tasks/cancel", post(cancel_handler))
         .route("/api/tasks/retry-last", post(retry_last_handler))
         .route("/api/reply", post(reply_handler))
+        .route("/api/history/query", post(history_query_handler))
         .route("/api/capability/invoke", post(capability_invoke_handler))
         .route("/api/capability/reload", post(capability_reload_handler))
         .route("/api/events/ws", get(events_ws_handler))
@@ -68,6 +71,35 @@ struct SendMessageResponse {
 struct TextResponse {
     status: &'static str,
     text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StatusResponse {
+    status: &'static str,
+    snapshot: RuntimeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct HistoryQueryRequest {
+    token: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    keyword: Option<String>,
+    #[serde(default)]
+    sender_name: Option<String>,
+    #[serde(default)]
+    start_time: Option<i64>,
+    #[serde(default)]
+    end_time: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct HistoryQueryResponse {
+    status: &'static str,
+    result: HistoryQueryResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -108,45 +140,21 @@ async fn groups_handler(
 
 async fn status_handler(
     State(state): State<ServiceState>,
-) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = state.task_snapshot().await;
-    let running = snapshot
-        .running_task_id
-        .clone()
-        .unwrap_or_else(|| "无".to_string());
-    let running_conversation = snapshot
-        .running_conversation_key
-        .clone()
-        .unwrap_or_else(|| "无".to_string());
-    let queue_len = snapshot.queue_len;
-    let last = snapshot
-        .last_terminal_summary
-        .clone()
-        .unwrap_or_else(|| "无".to_string());
-    let recent_output = if snapshot.recent_output.is_empty() {
-        "最近输出：无".to_string()
-    } else {
-        format!("最近输出：\n{}", snapshot.recent_output.join("\n"))
-    };
-    let prompt_file = snapshot
-        .prompt_file
-        .clone()
-        .unwrap_or_else(|| "无".to_string());
-    let text = format!(
-        "当前任务：{running}\n会话：{running_conversation}\n排队数量：{queue_len}\n最近结果：\
-         {last}\n{recent_output}\nPrompt file: {prompt_file}"
-    );
-    Ok(Json(TextResponse {
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Ok(Json(StatusResponse {
         status: "ok",
-        text,
+        snapshot: state.runtime_snapshot().await,
     }))
 }
 
 async fn queue_handler(
     State(state): State<ServiceState>,
 ) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = state.task_snapshot().await;
-    let text = format!("队列中的任务数量：{}", snapshot.queue_len);
+    let snapshot = state.runtime_snapshot().await;
+    let text = format!(
+        "等待中的会话：{}，待处理 turn：{}",
+        snapshot.ready_lane_count, snapshot.total_pending_turn_count
+    );
     Ok(Json(TextResponse {
         status: "ok",
         text,
@@ -213,8 +221,8 @@ async fn events_ws_handler(
 async fn cancel_handler(
     State(state): State<ServiceState>,
 ) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = state.task_snapshot().await;
-    let command = command_from_snapshot(&snapshot, ControlCommand::Cancel)?;
+    let snapshot = state.runtime_snapshot().await;
+    let command = command_from_runtime_snapshot(&snapshot, ControlCommand::Cancel)?;
     state
         .send_control_command(command)
         .await
@@ -228,8 +236,8 @@ async fn cancel_handler(
 async fn retry_last_handler(
     State(state): State<ServiceState>,
 ) -> Result<Json<TextResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = state.task_snapshot().await;
-    let command = retry_command_from_snapshot(&snapshot)?;
+    let snapshot = state.runtime_snapshot().await;
+    let command = retry_command_from_runtime_snapshot(&snapshot)?;
     state
         .send_control_command(command)
         .await
@@ -271,6 +279,33 @@ async fn reply_handler(
     Ok(Json(SendMessageResponse {
         status: "ok",
         receipt,
+    }))
+}
+
+async fn history_query_handler(
+    State(state): State<ServiceState>,
+    Json(payload): Json<HistoryQueryRequest>,
+) -> Result<Json<HistoryQueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if payload.token.trim().is_empty() {
+        return Err(bad_request("token must not be empty"));
+    }
+    let result = state
+        .query_current_conversation_history(
+            payload.token.as_str(),
+            HistoryQuery {
+                query: payload.query,
+                keyword: payload.keyword,
+                sender_name: payload.sender_name,
+                start_time: payload.start_time,
+                end_time: payload.end_time,
+                limit: payload.limit.unwrap_or(50),
+            },
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(HistoryQueryResponse {
+        status: "ok",
+        result,
     }))
 }
 
@@ -399,14 +434,21 @@ fn parse_conversation_command_target(conversation_key: &str) -> Option<(bool, i6
     Some((scope == "group", target))
 }
 
-fn command_from_snapshot(
-    snapshot: &TaskSnapshot,
+fn command_from_runtime_snapshot(
+    snapshot: &RuntimeSnapshot,
     command: ControlCommand,
 ) -> Result<CommandRequest, (StatusCode, Json<ErrorResponse>)> {
-    let conversation_key = snapshot
-        .running_conversation_key
-        .as_deref()
-        .ok_or_else(|| bad_request("missing conversation context"))?;
+    let running = snapshot
+        .lanes
+        .iter()
+        .filter(|lane| lane.state == LaneRuntimeState::Running)
+        .collect::<Vec<_>>();
+    let [lane] = running.as_slice() else {
+        return Err(bad_request(
+            "cancel requires exactly one running lane; use the in-chat /cancel command for lane-scoped control",
+        ));
+    };
+    let conversation_key = lane.conversation_key.as_str();
 
     let (is_group, target) = parse_conversation_command_target(conversation_key)
         .ok_or_else(|| bad_request("missing conversation context"))?;
@@ -422,14 +464,26 @@ fn command_from_snapshot(
     })
 }
 
-fn retry_command_from_snapshot(
-    snapshot: &TaskSnapshot,
+fn retry_command_from_runtime_snapshot(
+    snapshot: &RuntimeSnapshot,
 ) -> Result<CommandRequest, (StatusCode, Json<ErrorResponse>)> {
-    let conversation_key = snapshot
-        .running_conversation_key
-        .as_deref()
-        .or(snapshot.last_retryable_conversation_key.as_deref())
-        .ok_or_else(|| bad_request("missing retryable conversation context"))?;
+    let running = snapshot
+        .lanes
+        .iter()
+        .filter(|lane| lane.state == LaneRuntimeState::Running)
+        .collect::<Vec<_>>();
+    let conversation_key = match running.as_slice() {
+        [lane] => lane.conversation_key.as_str(),
+        [] => snapshot
+            .last_retryable_conversation_key
+            .as_deref()
+            .ok_or_else(|| bad_request("missing retryable conversation context"))?,
+        _ => {
+            return Err(bad_request(
+                "retry-last requires one running lane or one recorded retry candidate",
+            ));
+        },
+    };
 
     let (is_group, target) = parse_conversation_command_target(conversation_key)
         .ok_or_else(|| bad_request("missing retryable conversation context"))?;

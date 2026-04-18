@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Task lifecycle state persisted by the in-memory scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,8 @@ pub struct TaskSummary {
 pub enum TaskQueueError {
     /// No more queued slots are available.
     QueueFull,
+    /// This conversation already buffered the maximum pending turns.
+    LaneFull,
 }
 
 /// Per-conversation scheduler: each conversation_key may have at most one
@@ -47,10 +49,17 @@ pub enum TaskQueueError {
 pub struct Scheduler {
     /// Total capacity of waiting tasks summed across all conversations.
     queue_capacity: usize,
+    /// Maximum number of waiting tasks buffered inside one conversation.
+    lane_pending_capacity: usize,
     /// Running tasks keyed by conversation_key.
     running: HashMap<String, TaskSummary>,
     /// Per-conversation FIFO wait lists.
     queued: HashMap<String, VecDeque<TaskSummary>>,
+    /// FIFO of conversation lanes that currently have queued work and are
+    /// eligible to take the next runtime slot.
+    ready_lanes: VecDeque<String>,
+    /// Deduplication set for [`Self::ready_lanes`].
+    ready_lane_keys: HashSet<String>,
     /// Recent terminal task history, newest at end.
     last_terminal: VecDeque<TaskSummary>,
 }
@@ -60,11 +69,14 @@ impl Scheduler {
     const DEFAULT_TERMINAL_HISTORY_CAPACITY: usize = 16;
 
     /// Build a scheduler with an explicit queue capacity.
-    pub fn new(queue_capacity: usize) -> Self {
+    pub fn new(queue_capacity: usize, lane_pending_capacity: usize) -> Self {
         Self {
             queue_capacity,
+            lane_pending_capacity,
             running: HashMap::new(),
             queued: HashMap::new(),
+            ready_lanes: VecDeque::new(),
+            ready_lane_keys: HashSet::new(),
             last_terminal: VecDeque::new(),
         }
     }
@@ -81,6 +93,7 @@ impl Scheduler {
             !self.running.contains_key(conversation_key),
             "attempted to start a second concurrent task on conversation {conversation_key}"
         );
+        self.ready_lane_keys.remove(conversation_key);
         self.running.insert(
             conversation_key.to_string(),
             TaskSummary {
@@ -109,22 +122,31 @@ impl Scheduler {
         }
 
         let list = self.queued.entry(conversation_key.clone()).or_default();
+        if list.len() >= self.lane_pending_capacity {
+            return Err(TaskQueueError::LaneFull);
+        }
         list.push_back(TaskSummary {
             task_id,
-            conversation_key,
+            conversation_key: conversation_key.clone(),
             owner_sender_id,
             source_message_id,
             state: TaskState::Queued,
             summary: None,
         });
+        if !self.running.contains_key(&conversation_key)
+            && !self.ready_lane_keys.contains(&conversation_key)
+        {
+            self.ready_lanes.push_back(conversation_key.clone());
+            self.ready_lane_keys.insert(conversation_key);
+        }
         Ok(list.len())
     }
 
-    /// Mark the running task for a conversation as terminal and promote the
-    /// next queued task for the same conversation, if any.
+    /// Mark the running task for a conversation as terminal.
     ///
-    /// Returns the summary of the finished task. Panics if there is no
-    /// running task for the conversation.
+    /// When the same lane still has queued work, it is re-added to the global
+    /// ready-lane FIFO instead of being auto-promoted. This preserves
+    /// cross-lane fairness once a runtime slot becomes free.
     pub fn finish_running(
         &mut self,
         conversation_key: &str,
@@ -140,19 +162,12 @@ impl Scheduler {
         finished.summary = summary;
         self.push_terminal(finished.clone());
 
-        if let Some(list) = self.queued.get_mut(conversation_key) {
-            if let Some(next) = list.pop_front() {
-                self.running.insert(
-                    conversation_key.to_string(),
-                    TaskSummary {
-                        state: TaskState::Running,
-                        ..next
-                    },
-                );
-            }
-            if list.is_empty() {
-                self.queued.remove(conversation_key);
-            }
+        if self
+            .queued
+            .get(conversation_key)
+            .is_some_and(|list| !list.is_empty())
+        {
+            self.mark_lane_ready(conversation_key);
         }
 
         Some(finished)
@@ -241,6 +256,67 @@ impl Scheduler {
         self.queued.values().map(|list| list.len()).sum()
     }
 
+    /// Number of conversation lanes currently waiting for a runtime slot.
+    pub fn ready_len(&self) -> usize {
+        self.ready_lane_keys.len()
+    }
+
+    /// Remove and return the oldest ready lane that still has queued work.
+    pub fn pop_ready_lane(&mut self) -> Option<String> {
+        while let Some(conversation_key) = self.ready_lanes.pop_front() {
+            self.ready_lane_keys.remove(&conversation_key);
+            if self.running.contains_key(&conversation_key) {
+                continue;
+            }
+            if self
+                .queued
+                .get(&conversation_key)
+                .is_some_and(|list| !list.is_empty())
+            {
+                return Some(conversation_key);
+            }
+        }
+        None
+    }
+
+    /// Promote the next queued task for one lane into running state.
+    pub fn promote_queued(&mut self, conversation_key: &str) -> Option<TaskSummary> {
+        assert!(
+            !self.running.contains_key(conversation_key),
+            "attempted to promote a queued task while conversation {conversation_key} is already running"
+        );
+        self.ready_lane_keys.remove(conversation_key);
+        let list = self.queued.get_mut(conversation_key)?;
+        let next = list.pop_front()?;
+        let running = TaskSummary {
+            state: TaskState::Running,
+            ..next
+        };
+        self.running
+            .insert(conversation_key.to_string(), running.clone());
+        if list.is_empty() {
+            self.queued.remove(conversation_key);
+        }
+        Some(running)
+    }
+
+    /// Return pending queue counts grouped by conversation.
+    pub fn queued_counts(&self) -> Vec<(String, usize)> {
+        let mut counts = self
+            .queued
+            .iter()
+            .filter_map(|(conversation_key, list)| {
+                if list.is_empty() {
+                    None
+                } else {
+                    Some((conversation_key.clone(), list.len()))
+                }
+            })
+            .collect::<Vec<_>>();
+        counts.sort_by(|left, right| left.0.cmp(&right.0));
+        counts
+    }
+
     /// Most recent terminal task snapshot.
     pub fn last_terminal(&self) -> Option<&TaskSummary> {
         self.last_terminal.back()
@@ -286,6 +362,15 @@ impl Scheduler {
         )
     }
 
+    fn mark_lane_ready(&mut self, conversation_key: &str) {
+        if self.running.contains_key(conversation_key) || self.ready_lane_keys.contains(conversation_key)
+        {
+            return;
+        }
+        self.ready_lanes.push_back(conversation_key.to_string());
+        self.ready_lane_keys.insert(conversation_key.to_string());
+    }
+
     fn push_terminal(&mut self, task: TaskSummary) {
         self.last_terminal.push_back(task);
         if self.last_terminal.len() > Self::DEFAULT_TERMINAL_HISTORY_CAPACITY {
@@ -300,7 +385,7 @@ mod tests {
 
     #[test]
     fn terminal_history_is_bounded() {
-        let mut scheduler = Scheduler::new(2);
+        let mut scheduler = Scheduler::new(2, 2);
         for index in 0..25 {
             let state = if index % 2 == 0 { TaskState::Failed } else { TaskState::Interrupted };
             scheduler.record_terminal_state(
@@ -318,7 +403,7 @@ mod tests {
 
     #[test]
     fn distinct_conversations_can_run_concurrently() {
-        let mut scheduler = Scheduler::new(8);
+        let mut scheduler = Scheduler::new(8, 8);
         scheduler
             .start_task("a1", "private:1", 1, 100)
             .expect("start a1");
@@ -334,7 +419,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "second concurrent task")]
     fn same_conversation_rejects_parallel_start() {
-        let mut scheduler = Scheduler::new(8);
+        let mut scheduler = Scheduler::new(8, 8);
         scheduler
             .start_task("a1", "private:1", 1, 100)
             .expect("start a1");
@@ -343,7 +428,7 @@ mod tests {
 
     #[test]
     fn queue_respects_global_capacity() {
-        let mut scheduler = Scheduler::new(1);
+        let mut scheduler = Scheduler::new(1, 8);
         scheduler
             .enqueue("a1".to_string(), "private:1".to_string(), 1, 100)
             .expect("enqueue a1");
@@ -354,8 +439,8 @@ mod tests {
     }
 
     #[test]
-    fn finish_promotes_same_conversation_next() {
-        let mut scheduler = Scheduler::new(8);
+    fn finish_marks_same_conversation_ready_without_auto_promotion() {
+        let mut scheduler = Scheduler::new(8, 8);
         scheduler
             .start_task("a1", "private:1", 1, 100)
             .expect("start a1");
@@ -366,14 +451,19 @@ mod tests {
             .finish_running("private:1", TaskState::Completed, None)
             .expect("finish a1");
         assert_eq!(finished.task_id, "a1");
-        let running = scheduler.running_for("private:1").expect("a2 promoted");
+        assert!(scheduler.running_for("private:1").is_none());
+        assert_eq!(scheduler.ready_len(), 1);
+        assert_eq!(scheduler.pop_ready_lane().as_deref(), Some("private:1"));
+        let running = scheduler
+            .promote_queued("private:1")
+            .expect("a2 promoted explicitly");
         assert_eq!(running.task_id, "a2");
         assert_eq!(scheduler.queue_len(), 0);
     }
 
     #[test]
     fn cancel_respects_conversation_scope() {
-        let mut scheduler = Scheduler::new(8);
+        let mut scheduler = Scheduler::new(8, 8);
         scheduler
             .start_task("a1", "private:1", 1, 100)
             .expect("start a1");
@@ -383,5 +473,17 @@ mod tests {
         scheduler.cancel_running("private:1");
         assert!(scheduler.running_for("private:1").is_none());
         assert!(scheduler.running_for("group:2").is_some());
+    }
+
+    #[test]
+    fn lane_capacity_is_enforced_per_conversation() {
+        let mut scheduler = Scheduler::new(8, 1);
+        scheduler
+            .enqueue("a1".to_string(), "private:1".to_string(), 1, 100)
+            .expect("enqueue first");
+        let err = scheduler
+            .enqueue("a2".to_string(), "private:1".to_string(), 1, 101)
+            .expect_err("lane full");
+        assert_eq!(err, TaskQueueError::LaneFull);
     }
 }

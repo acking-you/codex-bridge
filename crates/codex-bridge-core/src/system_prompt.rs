@@ -1,6 +1,6 @@
 //! Layered system-prompt assembly for Codex Bridge.
 //!
-//! The prompt fed into Codex's `developer_instructions` is built in four
+//! The prompt fed into Codex's `developer_instructions` is built in five
 //! layers so operators can tune the bot's personality without touching
 //! the bridge protocol that keeps the system correct:
 //!
@@ -19,9 +19,12 @@
 //!    `# Available model capabilities` block, rendered from the
 //!    [`crate::model_capabilities::ModelRegistry`] and sharable across
 //!    the service state via an `Arc<RwLock<Option<String>>>`.
+//! 5. **Reply context** (runtime-rendered) — a lane-scoped block that
+//!    pins the exact per-conversation context-file path required by
+//!    `reply-current`.
 //!
 //! `build_developer_instructions` in `codex_runtime.rs` concatenates the
-//! four layers in order. The persona layer is the only one an operator
+//! five layers in order. The persona layer is the only one an operator
 //! is expected to edit; tweaking the bridge protocol or admin context
 //! requires a code change and a rebuild.
 
@@ -96,6 +99,46 @@ pub fn render_admin_block(admin_user_id: i64) -> String {
          way to recognise a 主人 turn; this QQ id is the fallback for cases where the \
          admin appears indirectly (e.g. quoted in a `[quote<msg:...>]` preamble or \
          pointed at via `@<QQ:{admin_user_id}>` inside another user's message).\n"
+    )
+}
+
+/// Render the runtime-owned "Reply context" block that pins down — for
+/// a specific thread — the absolute path of the per-conversation reply
+/// context file.
+///
+/// This layer exists because the legacy singleton mirror file
+/// (`reply_context.json`) is racy under concurrent tasks from different
+/// conversations: whichever task activated most recently overwrites the
+/// mirror, and any other task's skill invocation that reads the
+/// singleton picks up the wrong reply token — leading to replies
+/// landing in the wrong group ("串台"). Telling Codex the absolute path
+/// of THIS thread's per-conversation file turns the race into a
+/// deterministic binding.
+///
+/// The file at this path is written by
+/// [`crate::reply_context::ReplyRegistry::activate`] and deleted on
+/// deactivate, so it is only readable while a task is actually active —
+/// which is exactly when Codex would invoke `reply-current`.
+pub fn render_reply_context_block(
+    reply_contexts_dir: &std::path::Path,
+    conversation_key: &str,
+) -> String {
+    let path =
+        crate::reply_context::reply_context_file_for(reply_contexts_dir, conversation_key);
+    format!(
+        "# Reply context (for THIS thread only)\n\n\
+         This thread serves conversation `{conversation_key}`. Its reply-context \
+         file is at:\n\n\
+         \u{0020}\u{0020}\u{0020}\u{0020}`{path}`\n\n\
+         Every call to `reply-current` (and any script that needs this thread's \
+         token) **must** pass `--context-file {path}` verbatim. Do NOT read the \
+         legacy singleton at `.run/default/run/reply_context.json` — when multiple \
+         conversations are active the singleton races and your reply may land in \
+         the wrong chat.\n\n\
+         The bridge creates this file when the task starts and removes it when the \
+         task ends. If it is missing, the task is not active; do not fabricate a \
+         path or token.\n",
+        path = path.display(),
     )
 }
 

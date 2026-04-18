@@ -409,6 +409,13 @@ fn spawn_bridge_sink(
                     let _ = respond_to
                         .send(Err(anyhow::anyhow!("FetchMessage stubbed out in tests")));
                 },
+                ServiceCommand::FetchConversationHistory {
+                    respond_to, ..
+                } => {
+                    let _ = respond_to.send(Err(anyhow::anyhow!(
+                        "FetchConversationHistory stubbed out in tests"
+                    )));
+                },
             }
         }
     })
@@ -423,11 +430,14 @@ fn runtime_config(repo_root: &std::path::Path) -> OrchestratorConfig {
         .expect("write persona file");
     OrchestratorConfig {
         queue_capacity: 5,
+        lane_pending_capacity: 5,
+        runtime_pool_size: 2,
         repo_root: repo_root.to_path_buf(),
         artifacts_dir,
         prompt_file,
         group_start_reaction_emoji_id: "282".to_string(),
         admin_user_id: 2_394_626_220,
+        trusted_group_ids: Vec::new(),
         pending_approval_capacity: 32,
         approval_timeout_secs: 900,
     }
@@ -459,7 +469,7 @@ async fn wait_for_snapshot_prompt_file(state: &ServiceState) {
 async fn task_request_sends_started_and_final_reply() {
     let codex = FakeCodexExecutor::with_reply(vec!["thr_123"], "turn_1", "已经处理完成");
     let replies = FakeReplySink::default();
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     let task = make_task(1001, "private:42");
 
     handle_route_decision(RouteDecision::Task(task), &codex, &replies, &mut scheduler)
@@ -475,7 +485,7 @@ async fn task_request_sends_started_and_final_reply() {
 async fn task_request_persists_conversation_binding_when_missing() {
     let codex = FakeCodexExecutor::with_reply(vec!["thread-1"], "turn_1", "已完成");
     let replies = FakeReplySink::default();
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     let store = Arc::new(AsyncMutex::new(
         StateStore::open_in_memory().expect("open in-memory state store"),
     ));
@@ -505,7 +515,7 @@ async fn task_request_persists_conversation_binding_when_missing() {
 async fn task_request_reuses_binding_for_follow_up_task() {
     let codex = FakeCodexExecutor::with_reply(vec!["thread-2", "thread-2"], "turn_1", "已完成");
     let replies = FakeReplySink::default();
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     let store = Arc::new(AsyncMutex::new(
         StateStore::open_in_memory().expect("open in-memory state store"),
     ));
@@ -965,6 +975,87 @@ async fn admin_group_message_bypasses_approval() {
         "admin group requests must not generate approval notices"
     );
     assert_eq!(codex.ensure_thread_calls().await, vec![("group:778".to_string(), None)]);
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn non_admin_task_in_trusted_group_bypasses_approval() {
+    let codex = Arc::new(FakeCodexExecutor::with_status(
+        vec!["thread-trusted-group"],
+        "turn-trusted-group",
+        TurnStatus::Completed,
+        "",
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    // Trust group 778 wholesale, so a NON-admin member's @bot task runs
+    // without waiting for the admin salute reaction.
+    let mut config = runtime_config(tempdir.path());
+    config.trusted_group_ids = vec![778];
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store.clone(),
+        config,
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    // A plain member (not the admin) addresses the bot in the trusted group.
+    state.publish_event(make_group_event_from(
+        100_001, // non-admin sender
+        "friend",
+        778, // trusted group
+        6001,
+        "直接跑一下这个",
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let messages = sent_messages.lock().expect("messages").clone();
+            if messages.iter().any(|text| text == "REACTION:6001:282")
+                && messages
+                    .iter()
+                    .any(|text| text == &reply_formatter::format_missing_skill_reply())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("trusted-group task executed without approval");
+
+    let maybe_task = store
+        .lock()
+        .await
+        .latest_task_for_conversation("group:778")
+        .expect("query trusted-group task");
+    let task = maybe_task.expect("trusted-group task exists");
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert!(
+        !sent_messages
+            .lock()
+            .expect("messages")
+            .iter()
+            .any(|text| text.contains("待审批任务：")),
+        "trusted-group tasks must not generate approval notices"
+    );
+    assert_eq!(
+        codex.ensure_thread_calls().await,
+        vec![("group:778".to_string(), None)]
+    );
 
     run_handle.abort();
     bridge_handle.abort();
@@ -1802,6 +1893,87 @@ async fn distinct_conversations_run_their_turns_concurrently() {
         calls.iter().map(|(key, _)| key).collect();
     assert!(conversations.contains(&"private:2394626220".to_string()));
     assert!(conversations.contains(&"group:7777".to_string()));
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
+async fn runtime_pool_limit_queues_extra_conversations_until_a_slot_frees() {
+    let codex = Arc::new(FakeCodexExecutor::blocking(
+        vec!["thread-priv", "thread-group"],
+        "turn-x",
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages);
+    let store = Arc::new(AsyncMutex::new(StateStore::open_in_memory().expect("store")));
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = runtime_config(tempdir.path());
+    config.runtime_pool_size = 1;
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex.clone(),
+        store,
+        config,
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_private_event_from(2_394_626_220, "admin", 9501, "私聊长跑"));
+    state.publish_event(make_group_event_from(
+        2_394_626_220,
+        "admin",
+        8888,
+        9502,
+        "群里排队",
+    ));
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = state.runtime_snapshot().await;
+            let running_count = snapshot
+                .lanes
+                .iter()
+                .filter(|lane| lane.state == codex_bridge_core::lane_manager::LaneRuntimeState::Running)
+                .count();
+            let queued_count = snapshot
+                .lanes
+                .iter()
+                .filter(|lane| lane.state == codex_bridge_core::lane_manager::LaneRuntimeState::Queued)
+                .count();
+            if running_count == 1 && queued_count == 1 && snapshot.ready_lane_count == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one lane running and one queued");
+
+    assert_eq!(codex.ensure_thread_calls().await.len(), 1);
+
+    state
+        .send_control_command(make_command_request_from(
+            2_394_626_220,
+            ControlCommand::Cancel,
+        ))
+        .await
+        .expect("cancel running lane");
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if codex.ensure_thread_calls().await.len() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued lane started after slot freed");
 
     run_handle.abort();
     bridge_handle.abort();

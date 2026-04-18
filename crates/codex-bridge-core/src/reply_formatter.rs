@@ -15,6 +15,11 @@ pub fn format_queue_full() -> String {
     "呜、现在脑内线程真的满了……等我清一清再来嘛～(╥﹏╥)".to_string()
 }
 
+/// Return lane-capacity denial message for one busy conversation.
+pub fn format_lane_full() -> String {
+    "这个群（或私聊）里我已经攒了太多待处理消息啦……先等我把前面的做完嘛 (´；ω；`)".to_string()
+}
+
 /// Return failure response including cause.
 pub fn format_failure(message: &str) -> String {
     format!("欸……刚才那步翻车了 (´；ω；`)\n原因：{message}")

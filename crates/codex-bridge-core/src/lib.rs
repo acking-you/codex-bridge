@@ -39,6 +39,15 @@ pub mod system_prompt;
 /// Shared in-memory service state for the bridge runtime.
 pub mod service;
 
+/// Lane and runtime snapshot models for multi-conversation scheduling.
+pub mod lane_manager;
+
+/// Lane-scoped QQ conversation history query models.
+pub mod conversation_history;
+
+/// Runtime-pool primitives for lane-based Codex execution.
+pub mod runtime_pool;
+
 /// Single-task scheduling primitives.
 pub mod scheduler;
 

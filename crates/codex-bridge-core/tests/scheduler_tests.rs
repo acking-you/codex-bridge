@@ -7,7 +7,7 @@ const OWNER_2: i64 = 202;
 
 #[test]
 fn queue_rejects_the_sixth_waiting_task() {
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     scheduler
         .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start");
@@ -32,7 +32,7 @@ fn queue_rejects_the_sixth_waiting_task() {
 #[test]
 #[should_panic(expected = "second concurrent task")]
 fn start_task_rejects_parallel_start_for_same_conversation() {
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     scheduler
         .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start");
@@ -41,7 +41,7 @@ fn start_task_rejects_parallel_start_for_same_conversation() {
 
 #[test]
 fn retry_last_is_scoped_to_the_same_conversation_and_owner() {
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     scheduler.record_terminal_state(
         "task-a",
         "private:1",
@@ -67,7 +67,7 @@ fn retry_last_is_scoped_to_the_same_conversation_and_owner() {
 
 #[test]
 fn retry_candidate_never_returns_canceled_task() {
-    let mut scheduler = Scheduler::new(5);
+    let mut scheduler = Scheduler::new(5, 5);
     scheduler.record_terminal_state(
         "task-a",
         "private:1",
@@ -92,8 +92,8 @@ fn retry_candidate_never_returns_canceled_task() {
 }
 
 #[test]
-fn finish_running_promotes_next_task_within_the_same_conversation() {
-    let mut scheduler = Scheduler::new(2);
+fn finish_running_marks_next_task_ready_within_the_same_conversation() {
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler
         .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start first task");
@@ -104,9 +104,14 @@ fn finish_running_promotes_next_task_within_the_same_conversation() {
     let finished = scheduler
         .finish_running("private:1", TaskState::Completed, Some("done".into()))
         .expect("finish running");
-    let running = scheduler.running_for("private:1").expect("next running");
     assert_eq!(finished.task_id, "task-1");
     assert_eq!(finished.owner_sender_id, OWNER_1);
+    assert!(scheduler.running_for("private:1").is_none());
+    assert_eq!(scheduler.ready_len(), 1);
+    assert_eq!(scheduler.pop_ready_lane().as_deref(), Some("private:1"));
+    let running = scheduler
+        .promote_queued("private:1")
+        .expect("explicit promote");
     assert_eq!(running.task_id, "task-2");
     assert_eq!(running.owner_sender_id, OWNER_2);
     assert_eq!(running.state, TaskState::Running);
@@ -116,7 +121,7 @@ fn finish_running_promotes_next_task_within_the_same_conversation() {
 #[test]
 #[should_panic(expected = "attempted to finish with non-terminal state")]
 fn finish_running_requires_terminal_state() {
-    let mut scheduler = Scheduler::new(2);
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler
         .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start");
@@ -127,13 +132,13 @@ fn finish_running_requires_terminal_state() {
 #[test]
 #[should_panic(expected = "attempted to record non-terminal state")]
 fn terminal_recording_requires_terminal_state() {
-    let mut scheduler = Scheduler::new(2);
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler.record_terminal_state("task-1", "private:1", OWNER_1, 1001, TaskState::Queued, None);
 }
 
 #[test]
-fn cancel_running_marks_canceled_and_promotes_next_task_within_the_same_conversation() {
-    let mut scheduler = Scheduler::new(2);
+fn cancel_running_marks_canceled_and_readies_next_task_within_the_same_conversation() {
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler
         .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start first");
@@ -144,19 +149,21 @@ fn cancel_running_marks_canceled_and_promotes_next_task_within_the_same_conversa
     let finished = scheduler
         .cancel_running("private:1")
         .expect("cancel running");
-    let running = scheduler
-        .running_for("private:1")
-        .expect("promoted");
 
     assert_eq!(finished.task_id, "task-1");
     assert_eq!(finished.state, TaskState::Canceled);
+    assert!(scheduler.running_for("private:1").is_none());
+    assert_eq!(scheduler.pop_ready_lane().as_deref(), Some("private:1"));
+    let running = scheduler
+        .promote_queued("private:1")
+        .expect("promoted");
     assert_eq!(running.task_id, "task-2");
     assert_eq!(running.state, TaskState::Running);
 }
 
 #[test]
 fn finish_running_without_running_task_is_none() {
-    let mut scheduler = Scheduler::new(2);
+    let mut scheduler = Scheduler::new(2, 2);
     let finished = scheduler
         .finish_running("private:1", TaskState::Completed, Some("done".into()))
         .is_none();
@@ -166,7 +173,7 @@ fn finish_running_without_running_task_is_none() {
 
 #[test]
 fn retry_only_returns_failed_or_interrupted() {
-    let mut scheduler = Scheduler::new(2);
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler.record_terminal_state(
         "task-completed",
         "private:1",
@@ -190,7 +197,7 @@ fn retry_only_returns_failed_or_interrupted() {
 
 #[test]
 fn start_can_be_called_after_finish() {
-    let mut scheduler = Scheduler::new(2);
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler
         .start_task("task-1", "private:1", OWNER_1, 1001)
         .expect("start first");
@@ -209,7 +216,7 @@ fn start_can_be_called_after_finish() {
 
 #[test]
 fn different_conversations_run_concurrently() {
-    let mut scheduler = Scheduler::new(2);
+    let mut scheduler = Scheduler::new(2, 2);
     scheduler
         .start_task("task-a", "private:1", OWNER_1, 1001)
         .expect("start first");
@@ -219,3 +226,15 @@ fn different_conversations_run_concurrently() {
     assert_eq!(scheduler.running_all().len(), 2);
 }
 
+#[test]
+fn per_lane_capacity_rejects_second_waiting_turn() {
+    let mut scheduler = Scheduler::new(8, 1);
+    scheduler
+        .enqueue("task-a".to_string(), "private:1".to_string(), OWNER_1, 1001)
+        .expect("enqueue first");
+
+    let error = scheduler
+        .enqueue("task-b".to_string(), "private:1".to_string(), OWNER_1, 1002)
+        .expect_err("lane full");
+    assert_eq!(error, TaskQueueError::LaneFull);
+}

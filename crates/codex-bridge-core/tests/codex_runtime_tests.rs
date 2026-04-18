@@ -63,6 +63,11 @@ fn persona_template_covers_identity_voice_and_project_skills() {
 #[test]
 fn bridge_protocol_covers_turn_checklist_reply_and_permissions() {
     assert!(BRIDGE_PROTOCOL_TEXT.contains("# Turn start checklist"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("Gate 0"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("Context first"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("qq-current-history"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("qq-quoted-image-recovery"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("Recovering quoted images"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains("Gate 1"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains("reply-current"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains(".run/artifacts/"));
@@ -205,7 +210,8 @@ fn thread_resume_params_reapply_current_system_prompt() {
     fs::write(&persona_file, "# Persona\n\nprompt from runtime file").expect("write persona");
     let mut config = runtime_config();
     config.prompt_file = persona_file;
-    let params = build_thread_resume_params(&config, "thread-1").expect("build resume params");
+    let params = build_thread_resume_params(&config, "thread-1", "group:42")
+        .expect("build resume params");
 
     assert_eq!(params.thread_id, "thread-1");
     assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));

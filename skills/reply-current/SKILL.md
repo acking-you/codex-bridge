@@ -19,45 +19,63 @@ Do not use this skill for failures. Bridge-generated errors are handled by the r
 ## Rules
 - Reply only to the current active conversation. Do not invent QQ IDs or group IDs.
 - Use exactly one local `reply_current.py` command per message you want to send.
+- **Always pass `--context-file <path>`.** The path is given to you in the "# Reply context" section of your `developer_instructions` and is specific to THIS thread's conversation. The legacy singleton at `.run/default/run/reply_context.json` is shared across all active tasks and may point at the wrong group under concurrency — skill calls that omit `--context-file` can silently deliver the reply into another chat.
 - Attachments must already exist under `.run/artifacts/`.
 - Prefer text for short answers, image for visual output, and file for markdown/report artifacts.
 - If you want line breaks in QQ, put real newline characters in `--text`. The plain `"..."` form in bash does NOT turn `\n` into a newline; use `$'line1\nline2'` (ANSI-C quoting), or split a `"..."` string across two source lines, or call this skill once per line. The bridge defensively decodes a stray `\n`/`\r\n`/`\t` if one slips through, but writing real newlines is cleaner.
 - Group messages reach you with mention markers preserved: `@<bot>` is the placeholder for an `@` aimed at the bot itself, and `@nickname<QQ:1234567>` (or `@<QQ:1234567>` when the original at segment carried no name) is the placeholder for an `@` aimed at any other user. Read those markers when relevant; do not echo them back into your reply — a bare QQ id is meaningless to a human reader. The bridge will defensively strip any marker that slips through (and downgrade `@nickname<QQ:...>` to `@nickname`), but write clean text to begin with. Only @ someone when the sender asked for it; do not invent extra pings.
-- When the inbound message quoted another message, the bridge prepends a context block in the form `[quote<msg:12345> @nickname<QQ:1111>: 原文]` (or `[quote<msg:12345>]` when the fetch failed). Use it as read-only context. If a fetch failed and the content matters, mention the limitation rather than inventing a summary.
+- When the inbound message quoted another message, the bridge prepends a context block in the form `[quote<msg:12345> @nickname<QQ:1111>: 原文]` (or `[quote<msg:12345>]` when the fetch failed). Use it as read-only context. If the quoted content matters and the block is missing the real body — especially for quoted images — recover the original payload first with `qq-quoted-image-recovery` instead of inventing a summary.
 
 ## Commands
 Send plain text (default: @-mentions the original sender and quotes the triggering message):
 
 ```bash
-python3 skills/reply-current/reply_current.py --text "处理完成，结论在这里。"
+python3 skills/reply-current/reply_current.py \
+  --context-file /abs/path/from/developer_instructions/contexts/group_111.json \
+  --text "处理完啦～"
 ```
+
+`--context-file` is mandatory (the absolute path is given in your `developer_instructions` "# Reply context" section); omit it and you risk cross-talk between concurrent groups.
 
 Send plain text and @-mention specific users instead of the sender:
 
 ```bash
-python3 skills/reply-current/reply_current.py --text "这是你要的结果" --at 1234567
+python3 skills/reply-current/reply_current.py \
+  --context-file /abs/path/from/developer_instructions/contexts/group_111.json \
+  --text "这是你要的结果" \
+  --at 1234567
 ```
 
 ```bash
-python3 skills/reply-current/reply_current.py --text "你们看看这个" --at 1234567 7654321
+python3 skills/reply-current/reply_current.py \
+  --context-file /abs/path/from/developer_instructions/contexts/group_111.json \
+  --text "你们看看这个" \
+  --at 1234567 7654321
 ```
 
 Quote a specific earlier message instead of the triggering one (the reply pill in QQ will land on that message):
 
 ```bash
-python3 skills/reply-current/reply_current.py --text "找到了，就是这条" --reply-to 12345
+python3 skills/reply-current/reply_current.py \
+  --context-file /abs/path/from/developer_instructions/contexts/group_111.json \
+  --text "找到了，就是这条" \
+  --reply-to 12345
 ```
 
 Send an image artifact:
 
 ```bash
-python3 skills/reply-current/reply_current.py --image .run/artifacts/result.png
+python3 skills/reply-current/reply_current.py \
+  --context-file /abs/path/from/developer_instructions/contexts/group_111.json \
+  --image .run/artifacts/result.png
 ```
 
 Send a file artifact:
 
 ```bash
-python3 skills/reply-current/reply_current.py --file .run/artifacts/report.md
+python3 skills/reply-current/reply_current.py \
+  --context-file /abs/path/from/developer_instructions/contexts/group_111.json \
+  --file .run/artifacts/report.md
 ```
 
 ## Choosing who to @

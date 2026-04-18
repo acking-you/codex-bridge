@@ -11,7 +11,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    conversation_history::{HistoryQuery, HistoryQueryResult},
     events::NormalizedEvent,
+    lane_manager::RuntimeSnapshot,
     message_router::CommandRequest,
     outbound::OutboundMessage,
     reply_context::{ActiveReplyContext, ReplyRegistry},
@@ -150,6 +152,19 @@ pub enum ServiceCommand {
         /// Response channel carrying the rendered message.
         respond_to: oneshot::Sender<Result<crate::napcat::FetchedMessage>>,
     },
+    /// Fetch normalized QQ history scoped to the current conversation lane.
+    FetchConversationHistory {
+        /// Whether the current lane is a group chat.
+        is_group: bool,
+        /// QQ target identifier for the current lane.
+        target_id: i64,
+        /// Bot self-id used for placeholder-preserving text rendering.
+        self_id: i64,
+        /// Query options for filtering the fetched history slice.
+        query: HistoryQuery,
+        /// Response channel carrying normalized history.
+        respond_to: oneshot::Sender<Result<HistoryQueryResult>>,
+    },
     /// Route an orchestrator control command.
     Control {
         /// Payload for a local control command.
@@ -163,6 +178,7 @@ struct ServiceInner {
     friends: RwLock<Vec<FriendProfile>>,
     groups: RwLock<Vec<GroupProfile>>,
     task_snapshot: RwLock<TaskSnapshot>,
+    runtime_snapshot: RwLock<RuntimeSnapshot>,
     events_tx: broadcast::Sender<NormalizedEvent>,
     command_tx: mpsc::Sender<ServiceCommand>,
     control_tx: mpsc::Sender<ServiceCommand>,
@@ -209,15 +225,19 @@ impl ServiceState {
         command_tx: mpsc::Sender<ServiceCommand>,
         control_tx: mpsc::Sender<ServiceCommand>,
     ) -> Self {
-        Self::with_control_and_reply_context(command_tx, control_tx, test_reply_context_file())
+        Self::with_control_and_reply_context_paths(
+            command_tx,
+            control_tx,
+            test_reply_contexts_dir(),
+        )
     }
 
-    /// Build a service state with a custom control channel and reply-context
-    /// file.
-    pub fn with_control_and_reply_context(
+    /// Build a service state with explicit per-conversation reply-context
+    /// paths.
+    pub fn with_control_and_reply_context_paths(
         command_tx: mpsc::Sender<ServiceCommand>,
         control_tx: mpsc::Sender<ServiceCommand>,
-        reply_context_file: PathBuf,
+        reply_contexts_dir: PathBuf,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         Self {
@@ -226,10 +246,11 @@ impl ServiceState {
                 friends: RwLock::new(Vec::new()),
                 groups: RwLock::new(Vec::new()),
                 task_snapshot: RwLock::new(TaskSnapshot::default()),
+                runtime_snapshot: RwLock::new(RuntimeSnapshot::default()),
                 events_tx,
                 command_tx,
                 control_tx,
-                reply_registry: Mutex::new(ReplyRegistry::new(reply_context_file)),
+                reply_registry: Mutex::new(ReplyRegistry::new(reply_contexts_dir)),
                 capabilities: RwLock::new(Arc::new(
                     crate::model_capabilities::ModelRegistry::empty(),
                 )),
@@ -281,6 +302,13 @@ impl ServiceState {
                     } => {
                         let _ = respond_to
                             .send(Err(anyhow!("FetchMessage is not available in for_tests")));
+                    },
+                    ServiceCommand::FetchConversationHistory {
+                        respond_to, ..
+                    } => {
+                        let _ = respond_to.send(Err(anyhow!(
+                            "FetchConversationHistory is not available in for_tests"
+                        )));
                     },
                     ServiceCommand::Control {
                         command: _,
@@ -338,6 +366,16 @@ impl ServiceState {
     /// Read the current task snapshot.
     pub async fn task_snapshot(&self) -> TaskSnapshot {
         self.inner.task_snapshot.read().await.clone()
+    }
+
+    /// Replace the current multi-lane runtime snapshot.
+    pub async fn set_runtime_snapshot(&self, snapshot: RuntimeSnapshot) {
+        *self.inner.runtime_snapshot.write().await = snapshot;
+    }
+
+    /// Read the current multi-lane runtime snapshot.
+    pub async fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        self.inner.runtime_snapshot.read().await.clone()
     }
 
     /// Publish a normalized event to local websocket subscribers.
@@ -483,6 +521,32 @@ impl ServiceState {
             .map_err(|_| anyhow!("bridge worker dropped the response"))?
     }
 
+    /// Query normalized QQ history for the active conversation identified by
+    /// one reply token.
+    pub async fn query_current_conversation_history(
+        &self,
+        token: &str,
+        query: HistoryQuery,
+    ) -> Result<HistoryQueryResult> {
+        let context = self.reply_context(token).await?;
+        let self_id = self.session().await.self_id.unwrap_or_default();
+        let (respond_to, response_rx) = oneshot::channel();
+        self.inner
+            .command_tx
+            .send(ServiceCommand::FetchConversationHistory {
+                is_group: context.is_group,
+                target_id: context.reply_target_id,
+                self_id,
+                query,
+                respond_to,
+            })
+            .await
+            .map_err(|_| anyhow!("bridge worker is not available"))?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("bridge worker dropped the response"))?
+    }
+
     /// Dispatch a control command to the orchestrator runtime.
     pub async fn send_control_command(&self, command: CommandRequest) -> Result<()> {
         self.inner
@@ -562,6 +626,6 @@ impl ServiceState {
     }
 }
 
-fn test_reply_context_file() -> PathBuf {
-    std::env::temp_dir().join(format!("codex-bridge-reply-context-{}.json", Uuid::new_v4()))
+fn test_reply_contexts_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("codex-bridge-reply-contexts-{}", Uuid::new_v4()))
 }

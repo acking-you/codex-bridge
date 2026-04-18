@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
+    conversation_history::{apply_history_query, HistoryMessage, HistoryQuery, HistoryQueryResult},
     config::RuntimeConfig,
     events::NormalizedEvent,
     outbound::{OutboundMessage, OutboundSegment, OutboundTarget},
@@ -269,6 +270,20 @@ pub async fn run_bridge_loop(
                         } => {
                             let _ = respond_to.send(client.get_msg(message_id, self_id).await);
                         },
+                        ServiceCommand::FetchConversationHistory {
+                            is_group,
+                            target_id,
+                            self_id,
+                            query,
+                            respond_to,
+                        } => {
+                            let result = if is_group {
+                                client.get_group_history(target_id, self_id, query).await
+                            } else {
+                                client.get_friend_history(target_id, self_id, query).await
+                            };
+                            let _ = respond_to.send(result);
+                        },
                         ServiceCommand::Control { .. } => {},
                     },
                     None => {
@@ -498,6 +513,42 @@ impl NapCatClient {
         })
     }
 
+    async fn get_group_history(
+        &self,
+        group_id: i64,
+        self_id: i64,
+        query: HistoryQuery,
+    ) -> Result<HistoryQueryResult> {
+        let raw: Value = self
+            .call_action(
+                "get_group_msg_history",
+                json!({
+                    "group_id": group_id.to_string(),
+                    "count": query.effective_limit(),
+                }),
+            )
+            .await?;
+        normalize_history_result(&raw, self_id, &query)
+    }
+
+    async fn get_friend_history(
+        &self,
+        user_id: i64,
+        self_id: i64,
+        query: HistoryQuery,
+    ) -> Result<HistoryQueryResult> {
+        let raw: Value = self
+            .call_action(
+                "get_friend_msg_history",
+                json!({
+                    "user_id": user_id.to_string(),
+                    "count": query.effective_limit(),
+                }),
+            )
+            .await?;
+        normalize_history_result(&raw, self_id, &query)
+    }
+
     async fn call_action<T>(&self, action: &str, params: Value) -> Result<T>
     where
         T: DeserializeOwned,
@@ -539,6 +590,60 @@ impl NapCatClient {
             Err(_) => bail!("action response dropped for {action}"),
         }
     }
+}
+
+fn normalize_history_result(
+    raw: &Value,
+    self_id: i64,
+    query: &HistoryQuery,
+) -> Result<HistoryQueryResult> {
+    let messages = raw
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|message| normalize_history_message(&message, self_id))
+        .collect::<Vec<_>>();
+    Ok(apply_history_query(messages, query, query.effective_limit()))
+}
+
+fn normalize_history_message(message: &Value, self_id: i64) -> HistoryMessage {
+    let message_id = message
+        .get("message_id")
+        .and_then(parse_i64_value_from_json)
+        .or_else(|| message.get("id").and_then(parse_i64_value_from_json))
+        .unwrap_or_default();
+    let timestamp = message
+        .get("time")
+        .and_then(parse_i64_value_from_json)
+        .unwrap_or_default();
+    let sender_id = message
+        .get("sender")
+        .and_then(|sender| sender.get("user_id"))
+        .and_then(parse_i64_value_from_json)
+        .unwrap_or_default();
+    let sender_name = message
+        .get("sender")
+        .and_then(|sender| sender.get("nickname"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    HistoryMessage {
+        message_id,
+        timestamp,
+        sender_id,
+        sender_name,
+        text: crate::events::extract_text(message, self_id),
+    }
+}
+
+fn parse_i64_value_from_json(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

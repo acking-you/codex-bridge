@@ -32,6 +32,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
+    lane_manager::RuntimeSlotSnapshot,
     approval_guard::{ApprovalDecision, ApprovalGuard},
     system_prompt::load_persona,
 };
@@ -64,6 +65,12 @@ pub struct CodexRuntimeConfig {
     /// inbound `[主人]` marker is not present. Zero or negative means
     /// no admin is configured.
     pub admin_user_id: i64,
+    /// Directory holding per-conversation reply-context files. The
+    /// per-thread `developer_instructions` derive the absolute path of
+    /// this thread's context file from this directory so Codex never
+    /// has to race on the singleton mirror when multiple conversations
+    /// are active concurrently.
+    pub reply_contexts_dir: PathBuf,
     /// Shared, hot-reloadable "Available model capabilities" section
     /// appended to the loaded system prompt at `thread/start` /
     /// `thread/resume` time. The same `Arc` is held by
@@ -93,6 +100,7 @@ impl CodexRuntimeConfig {
             client_name: DEFAULT_CLIENT_NAME.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             admin_user_id: 0,
+            reply_contexts_dir: PathBuf::new(),
             capabilities_block: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
@@ -228,6 +236,11 @@ pub trait CodexExecutor: Send + Sync {
 
     /// Start compaction for one existing thread.
     async fn compact_thread(&self, thread_id: &str) -> Result<()>;
+
+    /// Return a point-in-time snapshot of runtime slot occupancy.
+    async fn runtime_slots(&self) -> Vec<RuntimeSlotSnapshot> {
+        Vec::new()
+    }
 }
 
 const RECENT_OUTPUT_LIMIT: usize = 4;
@@ -806,7 +819,7 @@ impl CodexExecutor for CodexRuntime {
                 let request_id = self.next_request_id().await;
                 let request = ClientRequest::ThreadResume {
                     request_id: request_id.clone(),
-                    params: build_thread_resume_params(&self.config, thread_id)?,
+                    params: build_thread_resume_params(&self.config, thread_id, conversation_key)?,
                 };
                 match self
                     .send_request::<ThreadResumeResponse>(request, request_id, "thread/resume")
@@ -1224,7 +1237,7 @@ pub fn build_thread_start_params(
     config: &CodexRuntimeConfig,
     conversation_key: &str,
 ) -> Result<ThreadStartParams> {
-    let prompt = build_developer_instructions(config)?;
+    let prompt = build_developer_instructions(config, conversation_key)?;
     Ok(ThreadStartParams {
         cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
         approval_policy: Some(default_approval_policy()),
@@ -1241,8 +1254,9 @@ pub fn build_thread_start_params(
 pub fn build_thread_resume_params(
     config: &CodexRuntimeConfig,
     thread_id: &str,
+    conversation_key: &str,
 ) -> Result<ThreadResumeParams> {
-    let prompt = build_developer_instructions(config)?;
+    let prompt = build_developer_instructions(config, conversation_key)?;
     Ok(ThreadResumeParams {
         thread_id: thread_id.to_string(),
         cwd: Some(config.workspace_root.to_string_lossy().into_owned()),
@@ -1262,7 +1276,7 @@ pub fn build_thread_compact_start_params(thread_id: &str) -> ThreadCompactStartP
     }
 }
 
-/// Assemble the four-layer developer instructions handed to Codex at
+/// Assemble the five-layer developer instructions handed to Codex at
 /// every `thread/start` / `thread/resume`:
 ///
 /// 1. **Persona** — operator-editable identity / voice / project skills
@@ -1277,7 +1291,13 @@ pub fn build_thread_compact_start_params(thread_id: &str) -> ThreadCompactStartP
 /// 4. **Model capabilities** — the hot-reloadable "Available model
 ///    capabilities" section rendered from the
 ///    [`crate::model_capabilities::ModelRegistry`], when non-empty.
-fn build_developer_instructions(config: &CodexRuntimeConfig) -> Result<String> {
+/// 5. **Reply context** — the per-thread absolute path to the reply
+///    context file for THIS conversation. Prevents cross-conversation
+///    reply delivery when multiple tasks are active concurrently.
+fn build_developer_instructions(
+    config: &CodexRuntimeConfig,
+    conversation_key: &str,
+) -> Result<String> {
     let persona = load_persona(&config.prompt_file)?;
     let bridge = crate::system_prompt::BRIDGE_PROTOCOL_TEXT;
     let admin = crate::system_prompt::render_admin_block(config.admin_user_id);
@@ -1300,6 +1320,16 @@ fn build_developer_instructions(config: &CodexRuntimeConfig) -> Result<String> {
         if !trimmed.is_empty() {
             layers.push(trimmed.to_string());
         }
+    }
+    if !conversation_key.is_empty() && !config.reply_contexts_dir.as_os_str().is_empty() {
+        layers.push(
+            crate::system_prompt::render_reply_context_block(
+                &config.reply_contexts_dir,
+                conversation_key,
+            )
+            .trim()
+            .to_string(),
+        );
     }
 
     Ok(layers.join("\n\n") + "\n")

@@ -62,8 +62,11 @@ pub struct RuntimePaths {
     pub database_path: PathBuf,
     /// Environment file containing generated tokens.
     pub launcher_env: PathBuf,
-    /// Runtime reply-context file for skill-facing reply commands.
-    pub reply_context_file: PathBuf,
+    /// Directory holding per-conversation reply-context files. Each
+    /// active task writes `<conversation_key>.json` here; Codex is told
+    /// the absolute path in its developer_instructions so concurrent
+    /// tasks never race on the legacy singleton mirror.
+    pub reply_contexts_dir: PathBuf,
     /// First-party skills directory.
     pub skills_dir: PathBuf,
     /// Root `.agents` directory.
@@ -120,7 +123,7 @@ impl RuntimePaths {
             prompt_file: runtime_root.join("prompt/persona.md"),
             database_path: runtime_root.join("state.sqlite3"),
             launcher_env: run_dir.join("launcher.env"),
-            reply_context_file: run_dir.join("reply_context.json"),
+            reply_contexts_dir: run_dir.join("contexts"),
             skills_dir: project_root.join("skills"),
             agents_dir: project_root.join(".agents"),
             agents_skills_link: project_root.join(".agents/skills"),
@@ -137,6 +140,11 @@ impl RuntimePaths {
             pid_file: runtime_root.join("run/qq.pid"),
         }
     }
+}
+
+/// Return the slot-specific runtime directory under the shared runtime root.
+pub fn runtime_slot_dir(runtime_root: &Path, slot_id: usize) -> PathBuf {
+    runtime_root.join("slots").join(format!("slot-{slot_id}"))
 }
 
 /// Prepare runtime directories, token files, and NapCat config files.
@@ -156,6 +164,7 @@ where
     fs::create_dir_all(&paths.cache_dir)?;
     fs::create_dir_all(&paths.prompt_dir)?;
     fs::create_dir_all(&paths.run_dir)?;
+    fs::create_dir_all(&paths.reply_contexts_dir)?;
     fs::create_dir_all(&paths.artifacts_dir)?;
     fs::create_dir_all(&paths.skills_dir)?;
     fs::create_dir_all(&paths.agents_dir)?;

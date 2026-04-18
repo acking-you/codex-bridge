@@ -6,10 +6,13 @@ use axum::{
 };
 use codex_bridge_core::{
     api::build_router,
+    conversation_history::{HistoryMessage, HistoryQueryResult},
+    lane_manager::{LaneRuntimeState, LaneSnapshot, RuntimeSlotSnapshot, RuntimeSlotState},
     reply_context::ActiveReplyContext,
-    service::{ServiceState, SessionSnapshot, SessionStatus, TaskSnapshot},
+    service::{ServiceCommand, ServiceState, SessionSnapshot, SessionStatus},
 };
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -72,16 +75,27 @@ async fn send_private_route_rejects_empty_text() {
 }
 
 #[tokio::test]
-async fn status_route_returns_running_snapshot_and_prompt_file() {
+async fn status_route_returns_lane_and_slot_snapshots() {
     let state = ServiceState::for_tests();
     state
-        .set_task_snapshot(TaskSnapshot {
-            running_task_id: Some("task-1".to_string()),
-            running_conversation_key: Some("private:42".to_string()),
-            running_summary: Some("正在执行".to_string()),
-            recent_output: vec!["先看 orchestrator".to_string(), "准备改 /status".to_string()],
-            queue_len: 2,
-            last_terminal_summary: Some("已完成".to_string()),
+        .set_runtime_snapshot(codex_bridge_core::lane_manager::RuntimeSnapshot {
+            lanes: vec![LaneSnapshot {
+                conversation_key: "private:42".to_string(),
+                thread_id: Some("thread-a".to_string()),
+                state: LaneRuntimeState::Running,
+                pending_turn_count: 2,
+                active_task_id: Some("task-1".to_string()),
+                active_since: Some("2026-04-18T11:00:00Z".to_string()),
+                last_progress_at: Some("2026-04-18T11:01:00Z".to_string()),
+                last_terminal_summary: Some("已完成".to_string()),
+            }],
+            runtime_slots: vec![RuntimeSlotSnapshot {
+                slot_id: 0,
+                state: RuntimeSlotState::Busy,
+                assigned_conversation_key: Some("private:42".to_string()),
+            }],
+            ready_lane_count: 1,
+            total_pending_turn_count: 2,
             last_retryable_conversation_key: None,
             prompt_file: Some(".run/default/prompt/system_prompt.md".to_string()),
         })
@@ -101,21 +115,22 @@ async fn status_route_returns_running_snapshot_and_prompt_file() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read body");
-    let body = String::from_utf8(body.to_vec()).expect("utf8");
-    assert!(body.contains("最近输出"));
-    assert!(body.contains("先看 orchestrator"));
-    assert!(body.contains("准备改 /status"));
-    assert!(body.contains("Prompt file: .run/default/prompt/system_prompt.md"));
-    assert!(!body.contains("Prompt version"));
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["snapshot"]["lanes"][0]["conversation_key"], "private:42");
+    assert_eq!(json["snapshot"]["lanes"][0]["state"], "running");
+    assert_eq!(json["snapshot"]["runtime_slots"][0]["state"], "busy");
+    assert_eq!(json["snapshot"]["prompt_file"], ".run/default/prompt/system_prompt.md");
 }
 
 #[tokio::test]
 async fn queue_route_reflects_snapshot() {
     let state = ServiceState::for_tests();
     state
-        .set_task_snapshot(TaskSnapshot {
-            queue_len: 1,
-            ..TaskSnapshot::default()
+        .set_runtime_snapshot(codex_bridge_core::lane_manager::RuntimeSnapshot {
+            ready_lane_count: 1,
+            total_pending_turn_count: 2,
+            ..Default::default()
         })
         .await;
 
@@ -130,6 +145,11 @@ async fn queue_route_reflects_snapshot() {
         .expect("queue response");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("queue json");
+    assert_eq!(json["text"], "等待中的会话：1，待处理 turn：2");
 }
 
 #[tokio::test]
@@ -153,9 +173,13 @@ async fn cancel_route_rejects_without_running_conversation() {
 async fn cancel_route_sends_when_running_conversation_exists() {
     let state = ServiceState::for_tests();
     state
-        .set_task_snapshot(TaskSnapshot {
-            running_conversation_key: Some("private:42".to_string()),
-            ..TaskSnapshot::default()
+        .set_runtime_snapshot(codex_bridge_core::lane_manager::RuntimeSnapshot {
+            lanes: vec![LaneSnapshot {
+                conversation_key: "private:42".to_string(),
+                state: LaneRuntimeState::Running,
+                ..Default::default()
+            }],
+            ..Default::default()
         })
         .await;
 
@@ -177,9 +201,13 @@ async fn cancel_route_sends_when_running_conversation_exists() {
 async fn retry_last_route_sends_when_running_conversation_exists() {
     let state = ServiceState::for_tests();
     state
-        .set_task_snapshot(TaskSnapshot {
-            running_conversation_key: Some("private:42".to_string()),
-            ..TaskSnapshot::default()
+        .set_runtime_snapshot(codex_bridge_core::lane_manager::RuntimeSnapshot {
+            lanes: vec![LaneSnapshot {
+                conversation_key: "private:42".to_string(),
+                state: LaneRuntimeState::Running,
+                ..Default::default()
+            }],
+            ..Default::default()
         })
         .await;
 
@@ -201,9 +229,9 @@ async fn retry_last_route_sends_when_running_conversation_exists() {
 async fn retry_last_route_uses_last_retryable_conversation_when_idle() {
     let state = ServiceState::for_tests();
     state
-        .set_task_snapshot(TaskSnapshot {
+        .set_runtime_snapshot(codex_bridge_core::lane_manager::RuntimeSnapshot {
             last_retryable_conversation_key: Some("private:42".to_string()),
-            ..TaskSnapshot::default()
+            ..Default::default()
         })
         .await;
 
@@ -313,6 +341,93 @@ async fn reply_route_rejects_files_outside_artifacts() {
         .expect("reply response");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn history_query_route_uses_lane_scoped_token() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let (control_tx, _control_rx) = mpsc::channel(8);
+    let state = ServiceState::with_control_and_reply_context_paths(
+        command_tx,
+        control_tx,
+        tempdir.path().join("contexts"),
+    );
+    state
+        .set_session(SessionSnapshot {
+            status: SessionStatus::Connected,
+            self_id: Some(99),
+            nickname: Some("bot".to_string()),
+            qq_pid: None,
+        })
+        .await;
+    state
+        .activate_reply_context(ActiveReplyContext {
+            token: "token-history".to_string(),
+            conversation_key: "group:123".to_string(),
+            is_group: true,
+            reply_target_id: 123,
+            source_message_id: 9001,
+            source_sender_id: 42,
+            source_sender_name: "alice".to_string(),
+            repo_root: tempdir.path().to_path_buf(),
+            artifacts_dir: tempdir.path().join(".run/artifacts"),
+        })
+        .await
+        .expect("activate reply context");
+
+    let command_handle = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if let ServiceCommand::FetchConversationHistory {
+                is_group,
+                target_id,
+                query,
+                respond_to,
+                ..
+            } = command
+            {
+                assert!(is_group);
+                assert_eq!(target_id, 123);
+                assert_eq!(query.query.as_deref(), Some("找部署那句"));
+                let _ = respond_to.send(Ok(HistoryQueryResult {
+                    messages: vec![HistoryMessage {
+                        message_id: 11,
+                        timestamp: 1_744_970_800,
+                        sender_id: 42,
+                        sender_name: "alice".to_string(),
+                        text: "部署今天下午做".to_string(),
+                    }],
+                    truncated: false,
+                }));
+                break;
+            }
+        }
+    });
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/history/query")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"token":"token-history","query":"找部署那句","limit":50}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("history query response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["result"]["messages"][0]["message_id"], 11);
+    assert_eq!(json["result"]["messages"][0]["text"], "部署今天下午做");
+
+    command_handle.await.expect("command handler");
 }
 
 #[tokio::test]

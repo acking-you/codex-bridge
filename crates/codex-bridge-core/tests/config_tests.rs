@@ -26,7 +26,6 @@ fn default_runtime_paths_live_under_project_run_dir() {
     assert_eq!(paths.admin_config_file, project_root.join(".run/default/config/admin.toml"));
     assert_eq!(paths.database_path, project_root.join(".run/default/state.sqlite3"));
     assert_eq!(paths.launcher_env, project_root.join(".run/default/run/launcher.env"));
-    assert_eq!(paths.reply_context_file, project_root.join(".run/default/run/reply_context.json"));
     assert_eq!(paths.skills_dir, project_root.join("skills"));
     assert_eq!(paths.agents_dir, project_root.join(".agents"));
     assert_eq!(paths.agents_skills_link, project_root.join(".agents/skills"));
@@ -47,6 +46,13 @@ fn default_runtime_config_uses_formal_ws_defaults() {
     assert_eq!(config.pending_approval_capacity, 32);
     assert_eq!(config.approval_timeout_secs, 900);
     assert_eq!(config.group_start_reaction_emoji_id, "282");
+    assert_eq!(config.runtime_pool_size, 2);
+    assert_eq!(config.lane_pending_capacity, 5);
+    assert_eq!(config.history_page_size, 50);
+    assert_eq!(config.history_max_pages, 4);
+    assert_eq!(config.max_turn_wall_time_secs, 900);
+    assert_eq!(config.stalled_turn_timeout_secs, 120);
+    assert_eq!(config.slot_restart_backoff_ms, 500);
 }
 
 #[test]

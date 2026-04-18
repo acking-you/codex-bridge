@@ -48,6 +48,15 @@ def parse_args() -> argparse.Namespace:
              "Ignored for private chats.",
     )
     parser.add_argument(
+        "--context-file",
+        type=Path,
+        required=True,
+        help="Absolute path to THIS thread's reply-context JSON file. "
+             "Provided in your developer_instructions (section 'Reply "
+             "context'). This is required because replies are lane-scoped "
+             "and the bridge never falls back to a singleton context file.",
+    )
+    parser.add_argument(
         "--api-bind",
         default="127.0.0.1:36111",
         help="codex-bridge local API bind address.",
@@ -65,14 +74,12 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def load_reply_context(root: Path) -> dict[str, object]:
-    context_path = root / ".run" / "default" / "run" / "reply_context.json"
+def load_reply_context(root: Path, context_file: Path) -> dict[str, object]:
+    context_path = context_file if context_file.is_absolute() else root / context_file
     try:
         return json.loads(context_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise SystemExit(
-            f"reply context not found: {context_path}. Is codex-bridge running a task?"
-        ) from exc
+        raise SystemExit(f"reply context not found: {context_path}") from exc
 
 
 def build_payload(args: argparse.Namespace, context: dict[str, object], root: Path) -> dict[str, object]:
@@ -144,7 +151,7 @@ def post_reply(api_bind: str, payload: dict[str, object]) -> dict[str, object]:
 def main() -> int:
     args = parse_args()
     root = repo_root()
-    context = load_reply_context(root)
+    context = load_reply_context(root, args.context_file)
     payload = build_payload(args, context, root)
     response = post_reply(args.api_bind, payload)
     print(json.dumps(response, ensure_ascii=False, indent=2))
