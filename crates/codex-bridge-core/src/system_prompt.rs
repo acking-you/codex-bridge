@@ -5,23 +5,21 @@
 //! the bridge protocol that keeps the system correct:
 //!
 //! 1. **Persona** (`persona.md`) — operator-editable identity, voice, and
-//!    project-specific skill pointers. Seeded from the packaged template
-//!    on first boot; subsequent edits are preserved across bridge
-//!    upgrades.
-//! 2. **Bridge protocol** (embedded) — turn-start checklist, mention /
-//!    quote / reply-to / permissions rules. Code-owned; changes with
-//!    bridge versions and is NEVER seeded to disk.
-//! 3. **Admin context** (runtime-rendered) — a tiny block that tells
-//!    Codex the configured admin's QQ id so it can recognise 主人 even
-//!    when the `[主人]` inbound marker is not present (e.g. when the
-//!    admin is mentioned in a quoted message).
-//! 4. **Model capabilities** (hot-reloadable) — the
-//!    `# Available model capabilities` block, rendered from the
-//!    [`crate::model_capabilities::ModelRegistry`] and sharable across
-//!    the service state via an `Arc<RwLock<Option<String>>>`.
-//! 5. **Reply context** (runtime-rendered) — a lane-scoped block that
-//!    pins the exact per-conversation context-file path required by
-//!    `reply-current`.
+//!    project-specific skill pointers. Seeded from the packaged template on
+//!    first boot; subsequent edits are preserved across bridge upgrades.
+//! 2. **Bridge protocol** (embedded) — turn-start checklist, mention / quote /
+//!    reply-to / permissions rules. Code-owned; changes with bridge versions
+//!    and is NEVER seeded to disk.
+//! 3. **Admin context** (runtime-rendered) — a tiny block that tells Codex the
+//!    configured admin's QQ id so it can recognise 主人 even when the `[主人]`
+//!    inbound marker is not present (e.g. when the admin is mentioned in a
+//!    quoted message).
+//! 4. **Model capabilities** (hot-reloadable) — the `# Available model
+//!    capabilities` block, rendered from the
+//!    [`crate::model_capabilities::ModelRegistry`] and sharable across the
+//!    service state via an `Arc<RwLock<Option<String>>>`.
+//! 5. **Reply context** (runtime-rendered) — a lane-scoped block that pins the
+//!    exact per-conversation context-file path required by `reply-current`.
 //!
 //! `build_developer_instructions` in `codex_runtime.rs` concatenates the
 //! five layers in order. The persona layer is the only one an operator
@@ -86,19 +84,17 @@ pub fn load_persona(persona_file: &Path) -> Result<String> {
 pub fn render_admin_block(admin_user_id: i64) -> String {
     if admin_user_id <= 0 {
         return String::from(
-            "# Admin context\n\n\
-             No admin is currently configured for this bridge. The 主人 \
-             register is inactive; treat every sender as a regular friend \
-             and do not use 主人 terminology until an admin is set.\n",
+            "# Admin context\n\nNo admin is currently configured for this bridge. The 主人 \
+             register is inactive; treat every sender as a regular friend and do not use 主人 \
+             terminology until an admin is set.\n",
         );
     }
     format!(
-        "# Admin context\n\n\
-         The admin's QQ id is **{admin_user_id}** — that person is your 主人. The \
-         `[主人]` marker on the current message (see bridge protocol) is the primary \
-         way to recognise a 主人 turn; this QQ id is the fallback for cases where the \
-         admin appears indirectly (e.g. quoted in a `[quote<msg:...>]` preamble or \
-         pointed at via `@<QQ:{admin_user_id}>` inside another user's message).\n"
+        "# Admin context\n\nThe admin's QQ id is **{admin_user_id}** — that person is your 主人. \
+         The `[主人]` marker on the current message (see bridge protocol) is the primary way to \
+         recognise a 主人 turn; this QQ id is the fallback for cases where the admin appears \
+         indirectly (e.g. quoted in a `[quote<msg:...>]` preamble or pointed at via \
+         `@<QQ:{admin_user_id}>` inside another user's message).\n"
     )
 }
 
@@ -123,21 +119,17 @@ pub fn render_reply_context_block(
     reply_contexts_dir: &std::path::Path,
     conversation_key: &str,
 ) -> String {
-    let path =
-        crate::reply_context::reply_context_file_for(reply_contexts_dir, conversation_key);
+    let path = crate::reply_context::reply_context_file_for(reply_contexts_dir, conversation_key);
     format!(
-        "# Reply context (for THIS thread only)\n\n\
-         This thread serves conversation `{conversation_key}`. Its reply-context \
-         file is at:\n\n\
-         \u{0020}\u{0020}\u{0020}\u{0020}`{path}`\n\n\
-         Every call to `reply-current` (and any script that needs this thread's \
-         token) **must** pass `--context-file {path}` verbatim. Do NOT read the \
-         legacy singleton at `.run/default/run/reply_context.json` — when multiple \
-         conversations are active the singleton races and your reply may land in \
-         the wrong chat.\n\n\
-         The bridge creates this file when the task starts and removes it when the \
-         task ends. If it is missing, the task is not active; do not fabricate a \
-         path or token.\n",
+        "# Reply context (for THIS thread only)\n\nThis thread serves conversation \
+         `{conversation_key}`. Its reply-context file is \
+         at:\n\n\u{0020}\u{0020}\u{0020}\u{0020}`{path}`\n\nEvery call to `reply-current` (and \
+         any script that needs this thread's token) **must** pass `--context-file {path}` \
+         verbatim. Do NOT read the legacy singleton at `.run/default/run/reply_context.json` — \
+         when multiple conversations are active the singleton races and your reply may land in \
+         the wrong chat.\n\nThe bridge creates this file when the task starts and removes it when \
+         the task ends. If it is missing, the task is not active; do not fabricate a path or \
+         token.\n",
         path = path.display(),
     )
 }

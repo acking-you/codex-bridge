@@ -94,17 +94,15 @@ impl Scheduler {
             "attempted to start a second concurrent task on conversation {conversation_key}"
         );
         self.ready_lane_keys.remove(conversation_key);
-        self.running.insert(
-            conversation_key.to_string(),
-            TaskSummary {
+        self.running
+            .insert(conversation_key.to_string(), TaskSummary {
                 task_id: task_id.to_string(),
                 conversation_key: conversation_key.to_string(),
                 owner_sender_id,
                 source_message_id,
                 state: TaskState::Running,
                 summary: None,
-            },
-        );
+            });
         Ok(())
     }
 
@@ -283,7 +281,8 @@ impl Scheduler {
     pub fn promote_queued(&mut self, conversation_key: &str) -> Option<TaskSummary> {
         assert!(
             !self.running.contains_key(conversation_key),
-            "attempted to promote a queued task while conversation {conversation_key} is already running"
+            "attempted to promote a queued task while conversation {conversation_key} is already \
+             running"
         );
         self.ready_lane_keys.remove(conversation_key);
         let list = self.queued.get_mut(conversation_key)?;
@@ -348,11 +347,7 @@ impl Scheduler {
     /// Mark the running task of one conversation as canceled and promote its
     /// next queued task, if any.
     pub fn cancel_running(&mut self, conversation_key: &str) -> Option<TaskSummary> {
-        self.finish_running(
-            conversation_key,
-            TaskState::Canceled,
-            Some("用户取消".to_string()),
-        )
+        self.finish_running(conversation_key, TaskState::Canceled, Some("用户取消".to_string()))
     }
 
     fn is_terminal_state(state: TaskState) -> bool {
@@ -363,7 +358,8 @@ impl Scheduler {
     }
 
     fn mark_lane_ready(&mut self, conversation_key: &str) {
-        if self.running.contains_key(conversation_key) || self.ready_lane_keys.contains(conversation_key)
+        if self.running.contains_key(conversation_key)
+            || self.ready_lane_keys.contains(conversation_key)
         {
             return;
         }

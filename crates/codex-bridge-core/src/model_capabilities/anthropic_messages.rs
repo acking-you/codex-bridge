@@ -110,10 +110,7 @@ impl ModelCapability for AnthropicMessages {
         &self.tags
     }
 
-    async fn invoke(
-        &self,
-        input: &CapabilityInput,
-    ) -> Result<CapabilityOutput, CapabilityError> {
+    async fn invoke(&self, input: &CapabilityInput) -> Result<CapabilityOutput, CapabilityError> {
         let prompt = input.prompt.trim();
         if prompt.is_empty() {
             return Err(CapabilityError::Input("prompt must not be empty".into()));
@@ -155,9 +152,7 @@ impl ModelCapability for AnthropicMessages {
             .map_err(|error| CapabilityError::Upstream(format!("decode response: {error}")))?;
         let text = parsed.extract_text();
         if text.trim().is_empty() {
-            return Err(CapabilityError::Upstream(
-                "upstream returned empty text content".into(),
-            ));
+            return Err(CapabilityError::Upstream("upstream returned empty text content".into()));
         }
         Ok(CapabilityOutput::Text {
             text,
@@ -234,10 +229,7 @@ mod tests {
     #[test]
     fn endpoint_strips_trailing_slash() {
         let cap = AnthropicMessages::from_config(sample_config()).expect("build");
-        assert_eq!(
-            cap.endpoint(),
-            "http://127.0.0.1:39180/api/kiro-gateway/v1/messages"
-        );
+        assert_eq!(cap.endpoint(), "http://127.0.0.1:39180/api/kiro-gateway/v1/messages");
     }
 
     #[test]
@@ -318,9 +310,6 @@ mod tests {
             }],
         };
         let payload = serde_json::to_value(&request).expect("serialize");
-        assert!(
-            payload.get("system").is_none(),
-            "system field leaked when None: {payload}"
-        );
+        assert!(payload.get("system").is_none(), "system field leaked when None: {payload}");
     }
 }

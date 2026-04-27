@@ -69,19 +69,13 @@ impl ReplyRegistry {
         let per_conversation_file =
             reply_context_file_for(&self.contexts_dir, &context.conversation_key);
         write_context_to_file(&per_conversation_file, &context).with_context(|| {
-            format!(
-                "write per-conversation reply context {}",
-                per_conversation_file.display()
-            )
+            format!("write per-conversation reply context {}", per_conversation_file.display())
         })?;
-        self.active.insert(
-            token.clone(),
-            ActiveReplyState {
-                context,
-                send_count: 0,
-                per_conversation_file,
-            },
-        );
+        self.active.insert(token.clone(), ActiveReplyState {
+            context,
+            send_count: 0,
+            per_conversation_file,
+        });
         Ok(())
     }
 
@@ -104,7 +98,10 @@ impl ReplyRegistry {
 
     /// Return how many successful reply sends happened for the given token.
     pub fn send_count_for(&self, token: &str) -> usize {
-        self.active.get(token).map(|state| state.send_count).unwrap_or(0)
+        self.active
+            .get(token)
+            .map(|state| state.send_count)
+            .unwrap_or(0)
     }
 
     /// Revoke a single reply context by token. Removes the matching
@@ -154,8 +151,9 @@ pub fn load_active_reply_context(path: impl AsRef<Path>) -> Result<ActiveReplyCo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn sample_context(token: &str, conversation_key: &str) -> ActiveReplyContext {
         ActiveReplyContext {
@@ -174,14 +172,8 @@ mod tests {
     #[test]
     fn filename_sanitizes_conversation_key_separator() {
         let dir = Path::new("/tmp/contexts");
-        assert_eq!(
-            reply_context_file_for(dir, "group:111"),
-            dir.join("group_111.json")
-        );
-        assert_eq!(
-            reply_context_file_for(dir, "private:222"),
-            dir.join("private_222.json")
-        );
+        assert_eq!(reply_context_file_for(dir, "group:111"), dir.join("group_111.json"));
+        assert_eq!(reply_context_file_for(dir, "private:222"), dir.join("private_222.json"));
     }
 
     #[test]

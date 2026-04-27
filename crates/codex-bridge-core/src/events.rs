@@ -146,18 +146,18 @@ fn normalize_message_event(value: Value) -> Result<NormalizedEvent, NormalizeEve
 
 fn normalize_notice_event(value: Value) -> Result<NormalizedEvent, NormalizeEventError> {
     match value.get("notice_type").and_then(Value::as_str) {
-        Some("group_msg_emoji_like") => Ok(NormalizedEvent::GroupMessageReactionReceived(
-            GroupMessageReactionEvent {
+        Some("group_msg_emoji_like") => {
+            Ok(NormalizedEvent::GroupMessageReactionReceived(GroupMessageReactionEvent {
                 group_id: extract_i64(&value, "group_id")?,
                 operator_id: extract_i64(&value, "user_id")?,
                 message_id: extract_i64(&value, "message_id")?,
                 emoji_id: extract_notice_emoji_id(&value)?,
                 is_add: value.get("is_add").and_then(Value::as_bool).unwrap_or(true),
                 raw: value,
-            },
-        )),
-        Some("reaction") => Ok(NormalizedEvent::GroupMessageReactionReceived(
-            GroupMessageReactionEvent {
+            }))
+        },
+        Some("reaction") => {
+            Ok(NormalizedEvent::GroupMessageReactionReceived(GroupMessageReactionEvent {
                 group_id: extract_i64(&value, "group_id")?,
                 operator_id: extract_i64(&value, "operator_id")?,
                 message_id: extract_i64(&value, "message_id")?,
@@ -168,8 +168,8 @@ fn normalize_notice_event(value: Value) -> Result<NormalizedEvent, NormalizeEven
                     .to_string(),
                 is_add: value.get("sub_type").and_then(Value::as_str) == Some("add"),
                 raw: value,
-            },
-        )),
+            }))
+        },
         _ => Err(NormalizeEventError::Unsupported),
     }
 }
@@ -274,12 +274,12 @@ fn extract_sender_name(value: &Value) -> String {
 /// Render the message body as a flat string while preserving every `@`
 /// segment in a deterministic, agent-readable form.
 ///
-/// - `@bot` (the bot's own self_id) becomes the literal placeholder
-///   `@<bot>` so the agent can recognise that it is being addressed without
-///   leaking its raw QQ id.
+/// - `@bot` (the bot's own self_id) becomes the literal placeholder `@<bot>` so
+///   the agent can recognise that it is being addressed without leaking its raw
+///   QQ id.
 /// - Any other `@user` becomes `@nickname<QQ:1234>` when the OneBot `at`
-///   segment carries a `name` so the agent sees both the displayed name and
-///   the underlying QQ id, or `@<QQ:1234>` when no name was supplied.
+///   segment carries a `name` so the agent sees both the displayed name and the
+///   underlying QQ id, or `@<QQ:1234>` when no name was supplied.
 /// - Unknown segment types are dropped.
 pub(crate) fn extract_text(value: &Value, self_id: i64) -> String {
     if let Some(segments) = value.get("message").and_then(Value::as_array) {

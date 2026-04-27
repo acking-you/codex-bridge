@@ -13,15 +13,9 @@ use codex_bridge_cli::{
     task_exit::background_task_exit_error,
 };
 use codex_bridge_core::{
-    api,
-    codex_runtime::CodexRuntimeConfig,
-    config::RuntimeConfig,
-    launcher, napcat, orchestrator,
-    model_capabilities::ModelRegistry,
-    runtime_pool::RuntimePool,
-    runtime::load_admin_config,
-    service::ServiceState,
-    state_store::StateStore,
+    api, codex_runtime::CodexRuntimeConfig, config::RuntimeConfig, launcher,
+    model_capabilities::ModelRegistry, napcat, orchestrator, runtime::load_admin_config,
+    runtime_pool::RuntimePool, service::ServiceState, state_store::StateStore,
 };
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
@@ -125,13 +119,13 @@ async fn run_command(config: RuntimeConfig) -> Result<()> {
     let admin_config = load_admin_config(&prepared.paths.admin_config_file)?;
 
     // Wire the hot-reloadable capability pipeline:
-    //   1. Point ServiceState at the TOML file on disk so
-    //      /api/capability/reload can re-read it later.
-    //   2. Share the prompt-block Arc with the Codex runtime so updates
-    //      via set_capabilities / reload_capabilities are visible on the
-    //      next thread/start or thread/resume.
-    //   3. Load the initial registry and publish it (also rerenders the
-    //      shared prompt block atomically).
+    //   1. Point ServiceState at the TOML file on disk so /api/capability/reload
+    //      can re-read it later.
+    //   2. Share the prompt-block Arc with the Codex runtime so updates via
+    //      set_capabilities / reload_capabilities are visible on the next
+    //      thread/start or thread/resume.
+    //   3. Load the initial registry and publish it (also rerenders the shared
+    //      prompt block atomically).
     state.set_capabilities_file(prepared.paths.model_capabilities_file.clone());
     let mut codex_runtime_config = CodexRuntimeConfig::new(
         codex_repo_root(&project_root),
@@ -314,6 +308,7 @@ async fn reply_command(
     _file: Option<PathBuf>,
 ) -> Result<()> {
     anyhow::bail!(
-        "codex-bridge reply no longer infers a singleton reply context; use the reply-current skill with --context-file"
+        "codex-bridge reply no longer infers a singleton reply context; use the reply-current \
+         skill with --context-file"
     )
 }

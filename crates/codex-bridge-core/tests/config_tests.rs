@@ -164,8 +164,5 @@ fn prepare_runtime_state_keeps_existing_isolated_codex_config_toml() {
 
     result.unwrap();
 
-    assert_eq!(
-        fs::read_to_string(isolated_config).unwrap(),
-        "model = \"existing-runtime\"\n"
-    );
+    assert_eq!(fs::read_to_string(isolated_config).unwrap(), "model = \"existing-runtime\"\n");
 }

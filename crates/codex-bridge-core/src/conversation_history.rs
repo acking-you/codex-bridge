@@ -69,7 +69,11 @@ pub fn apply_history_query(
     query: &HistoryQuery,
     scanned_limit: usize,
 ) -> HistoryQueryResult {
-    let freeform = query.query.as_deref().map(str::trim).filter(|text| !text.is_empty());
+    let freeform = query
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
     let keyword = query
         .keyword
         .as_deref()

@@ -410,9 +410,7 @@ async fn history_query_route_uses_lane_scoped_token() {
                 .method("POST")
                 .uri("/api/history/query")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"token":"token-history","query":"找部署那句","limit":50}"#,
-                ))
+                .body(Body::from(r#"{"token":"token-history","query":"找部署那句","limit":50}"#))
                 .expect("request"),
         )
         .await

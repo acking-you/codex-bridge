@@ -51,8 +51,7 @@ impl AdminConfig {
 
     /// Parse admin config from a TOML string.
     pub fn parse_contents(contents: &str) -> Result<Self> {
-        let raw: RawAdminConfig =
-            toml::from_str(contents).context("decode admin config TOML")?;
+        let raw: RawAdminConfig = toml::from_str(contents).context("decode admin config TOML")?;
         if raw.admin_user_id <= 0 {
             bail!("admin_user_id must be a positive QQ identifier");
         }
@@ -71,17 +70,13 @@ impl AdminConfig {
 /// Render the default `admin.toml` template content.
 pub fn default_admin_config_template() -> String {
     format!(
-        "# Codex Bridge admin approval config\n\
-         admin_user_id = {DEFAULT_ADMIN_USER_ID}\n\
-         \n\
-         # QQ group ids that are trusted wholesale: every member in these groups can\n\
-         # reach Codex via @bot without admin approval. Leave empty ([]) to require\n\
-         # admin approval for every non-admin group task (the default).\n\
-         #\n\
-         # Trusted-group members still follow host-level policy (no deletion, no\n\
-         # heavy-load operations, etc.) — trust here only short-circuits the admin\n\
-         # salute-reaction dance, not the bridge's own refusal rules.\n\
-         trusted_group_ids = []\n"
+        "# Codex Bridge admin approval config\nadmin_user_id = {DEFAULT_ADMIN_USER_ID}\n\n# QQ \
+         group ids that are trusted wholesale: every member in these groups can\n# reach Codex \
+         via @bot without admin approval. Leave empty ([]) to require\n# admin approval for every \
+         non-admin group task (the default).\n#\n# Trusted-group members still follow host-level \
+         policy (no deletion, no\n# heavy-load operations, etc.) — trust here only short-circuits \
+         the admin\n# salute-reaction dance, not the bridge's own refusal \
+         rules.\ntrusted_group_ids = []\n"
     )
 }
 

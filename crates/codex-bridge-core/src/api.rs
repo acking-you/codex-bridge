@@ -290,17 +290,14 @@ async fn history_query_handler(
         return Err(bad_request("token must not be empty"));
     }
     let result = state
-        .query_current_conversation_history(
-            payload.token.as_str(),
-            HistoryQuery {
-                query: payload.query,
-                keyword: payload.keyword,
-                sender_name: payload.sender_name,
-                start_time: payload.start_time,
-                end_time: payload.end_time,
-                limit: payload.limit.unwrap_or(50),
-            },
-        )
+        .query_current_conversation_history(payload.token.as_str(), HistoryQuery {
+            query: payload.query,
+            keyword: payload.keyword,
+            sender_name: payload.sender_name,
+            start_time: payload.start_time,
+            end_time: payload.end_time,
+            limit: payload.limit.unwrap_or(50),
+        })
         .await
         .map_err(internal_error)?;
     Ok(Json(HistoryQueryResponse {
@@ -322,14 +319,8 @@ struct CapabilityInvokeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum CapabilityInvokeResponse {
-    Text {
-        id: String,
-        text: String,
-    },
-    Image {
-        id: String,
-        path: String,
-    },
+    Text { id: String, text: String },
+    Image { id: String, path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -347,9 +338,7 @@ async fn capability_invoke_handler(
     }
     let registry = state.capabilities().await;
     let Some(capability) = registry.get(payload.id.as_str()) else {
-        return Err(bad_request(
-            format!("unknown capability id: {}", payload.id).as_str(),
-        ));
+        return Err(bad_request(format!("unknown capability id: {}", payload.id).as_str()));
     };
     let input = CapabilityInput {
         prompt: payload.prompt,
@@ -445,7 +434,8 @@ fn command_from_runtime_snapshot(
         .collect::<Vec<_>>();
     let [lane] = running.as_slice() else {
         return Err(bad_request(
-            "cancel requires exactly one running lane; use the in-chat /cancel command for lane-scoped control",
+            "cancel requires exactly one running lane; use the in-chat /cancel command for \
+             lane-scoped control",
         ));
     };
     let conversation_key = lane.conversation_key.as_str();

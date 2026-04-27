@@ -19,8 +19,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    conversation_history::{apply_history_query, HistoryMessage, HistoryQuery, HistoryQueryResult},
     config::RuntimeConfig,
+    conversation_history::{apply_history_query, HistoryMessage, HistoryQuery, HistoryQueryResult},
     events::NormalizedEvent,
     outbound::{OutboundMessage, OutboundSegment, OutboundTarget},
     runtime::RuntimeTokens,

@@ -109,8 +109,5 @@ pub trait ModelCapability: std::fmt::Debug + Send + Sync {
     fn tags(&self) -> &[&'static str];
 
     /// Execute the capability. Must be stateless across calls.
-    async fn invoke(
-        &self,
-        input: &CapabilityInput,
-    ) -> Result<CapabilityOutput, CapabilityError>;
+    async fn invoke(&self, input: &CapabilityInput) -> Result<CapabilityOutput, CapabilityError>;
 }

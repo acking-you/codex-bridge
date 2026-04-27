@@ -200,11 +200,7 @@ pub fn build_outbound_message(
 
     match payload {
         ReplyPayload::Text(text) => segments.push(OutboundSegment::Text {
-            text: if context.is_group {
-                prefix_group_text_with_space(text)
-            } else {
-                text
-            },
+            text: if context.is_group { prefix_group_text_with_space(text) } else { text },
         }),
         ReplyPayload::Image {
             path,
@@ -276,8 +272,8 @@ fn resolve_artifact_path(path: &Path, context: &ActiveReplyContext) -> Result<Pa
 ///
 /// - `@<bot>` is removed entirely.
 /// - `@<QQ:1234>` (no nickname) is removed entirely.
-/// - `@nickname<QQ:1234>` degrades to `@nickname` — the displayed name is
-///   kept so the sentence still reads naturally, but the QQ id is dropped.
+/// - `@nickname<QQ:1234>` degrades to `@nickname` — the displayed name is kept
+///   so the sentence still reads naturally, but the QQ id is dropped.
 ///
 /// One trailing ASCII space after a removed placeholder is consumed so we
 /// don't leave double spaces behind, and the result is trimmed. Text that
@@ -363,10 +359,7 @@ mod sanitize_tests {
     #[test]
     fn keeps_nickname_when_metadata_leaks() {
         let text = "@suibianwanwan<QQ:1597226206> 不能帮你定向辱骂别人。";
-        assert_eq!(
-            sanitize_inbound_mentions(text),
-            "@suibianwanwan 不能帮你定向辱骂别人。",
-        );
+        assert_eq!(sanitize_inbound_mentions(text), "@suibianwanwan 不能帮你定向辱骂别人。",);
     }
 
     #[test]
@@ -416,9 +409,7 @@ mod sanitize_tests {
 mod build_outbound_tests {
     use std::path::PathBuf;
 
-    use super::{
-        build_outbound_message, OutboundSegment, OutboundTarget, ReplyPayload,
-    };
+    use super::{build_outbound_message, OutboundSegment, OutboundTarget, ReplyPayload};
     use crate::reply_context::ActiveReplyContext;
 
     fn group_context() -> ActiveReplyContext {
@@ -459,12 +450,7 @@ mod build_outbound_tests {
     #[test]
     fn group_default_quotes_source_message_when_reply_to_absent() {
         let ctx = group_context();
-        let message = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text("hi".into()),
-            &[],
-            None,
-        );
+        let message = build_outbound_message(&ctx, ReplyPayload::Text("hi".into()), &[], None);
         assert_eq!(message.target, OutboundTarget::Group(42));
         assert_eq!(reply_segments(&message), vec![1000]);
     }
@@ -484,12 +470,8 @@ mod build_outbound_tests {
     #[test]
     fn private_target_carries_no_reply_or_at_segments() {
         let ctx = private_context();
-        let message = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text("privmsg".into()),
-            &[],
-            Some(9999),
-        );
+        let message =
+            build_outbound_message(&ctx, ReplyPayload::Text("privmsg".into()), &[], Some(9999));
         assert_eq!(message.target, OutboundTarget::Private(123));
         assert!(reply_segments(&message).is_empty());
         assert!(!message
@@ -501,12 +483,8 @@ mod build_outbound_tests {
     #[test]
     fn group_preserves_at_targets_when_reply_to_set() {
         let ctx = group_context();
-        let message = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text("ok".into()),
-            &[111, 222],
-            Some(333),
-        );
+        let message =
+            build_outbound_message(&ctx, ReplyPayload::Text("ok".into()), &[111, 222], Some(333));
         assert_eq!(reply_segments(&message), vec![333]);
         let ats: Vec<i64> = message
             .segments
@@ -537,44 +515,27 @@ mod build_outbound_tests {
     #[test]
     fn group_text_gets_leading_space_so_at_pill_is_readable() {
         let ctx = group_context();
-        let message = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text("处理完啦～".into()),
-            &[],
-            None,
-        );
+        let message =
+            build_outbound_message(&ctx, ReplyPayload::Text("处理完啦～".into()), &[], None);
         assert_eq!(text_body(&message), " 处理完啦～");
     }
 
     #[test]
     fn group_text_with_existing_leading_whitespace_is_not_doubled() {
         let ctx = group_context();
-        let message_space = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text(" 已有前置空格".into()),
-            &[],
-            None,
-        );
+        let message_space =
+            build_outbound_message(&ctx, ReplyPayload::Text(" 已有前置空格".into()), &[], None);
         assert_eq!(text_body(&message_space), " 已有前置空格");
 
-        let message_newline = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text("\n换行开头".into()),
-            &[],
-            None,
-        );
+        let message_newline =
+            build_outbound_message(&ctx, ReplyPayload::Text("\n换行开头".into()), &[], None);
         assert_eq!(text_body(&message_newline), "\n换行开头");
     }
 
     #[test]
     fn private_text_is_left_untouched() {
         let ctx = private_context();
-        let message = build_outbound_message(
-            &ctx,
-            ReplyPayload::Text("你好呀".into()),
-            &[],
-            None,
-        );
+        let message = build_outbound_message(&ctx, ReplyPayload::Text("你好呀".into()), &[], None);
         assert_eq!(text_body(&message), "你好呀");
     }
 }

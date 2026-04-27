@@ -38,9 +38,13 @@ fn reply_context_token_can_send_multiple_times_until_revoked() {
             .token,
         "token-1"
     );
-    assert!(!repo_root.join(".run/default/run/reply_context.json").exists());
+    assert!(!repo_root
+        .join(".run/default/run/reply_context.json")
+        .exists());
 
-    registry.deactivate("token-1").expect("deactivate reply context");
+    registry
+        .deactivate("token-1")
+        .expect("deactivate reply context");
     assert!(registry.resolve("token-1").is_err());
     assert!(!lane_file.exists());
 }
@@ -97,9 +101,8 @@ fn reply_registry_supports_multiple_active_tokens_concurrently() {
             .conversation_key,
         "private:2"
     );
-    assert!(
-        load_active_reply_context(reply_context_file_for(&contexts_dir, "private:2"))
-            .is_ok()
-    );
-    assert!(!repo_root.join(".run/default/run/reply_context.json").exists());
+    assert!(load_active_reply_context(reply_context_file_for(&contexts_dir, "private:2")).is_ok());
+    assert!(!repo_root
+        .join(".run/default/run/reply_context.json")
+        .exists());
 }

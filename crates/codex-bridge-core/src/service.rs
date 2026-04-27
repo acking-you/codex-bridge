@@ -563,10 +563,7 @@ impl ServiceState {
     /// rendered prompt block. Subsequent callers — both the API layer
     /// and the Codex runtime (via the shared `capabilities_block`
     /// `Arc`) — observe the new state on their next access.
-    pub async fn set_capabilities(
-        &self,
-        registry: Arc<crate::model_capabilities::ModelRegistry>,
-    ) {
+    pub async fn set_capabilities(&self, registry: Arc<crate::model_capabilities::ModelRegistry>) {
         let block = registry.render_prompt_block();
         *self.inner.capabilities.write().await = registry;
         match self.inner.capabilities_prompt_block.write() {
@@ -587,9 +584,7 @@ impl ServiceState {
     /// Return a cloneable `Arc` handle to the shared capabilities prompt
     /// block. Hand this to [`crate::codex_runtime::CodexRuntimeConfig`]
     /// so prompt injection and hot-reload share one cell.
-    pub fn capabilities_prompt_block_handle(
-        &self,
-    ) -> Arc<std::sync::RwLock<Option<String>>> {
+    pub fn capabilities_prompt_block_handle(&self) -> Arc<std::sync::RwLock<Option<String>>> {
         self.inner.capabilities_prompt_block.clone()
     }
 

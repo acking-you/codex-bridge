@@ -154,9 +154,7 @@ fn cancel_running_marks_canceled_and_readies_next_task_within_the_same_conversat
     assert_eq!(finished.state, TaskState::Canceled);
     assert!(scheduler.running_for("private:1").is_none());
     assert_eq!(scheduler.pop_ready_lane().as_deref(), Some("private:1"));
-    let running = scheduler
-        .promote_queued("private:1")
-        .expect("promoted");
+    let running = scheduler.promote_queued("private:1").expect("promoted");
     assert_eq!(running.task_id, "task-2");
     assert_eq!(running.state, TaskState::Running);
 }
@@ -208,10 +206,7 @@ fn start_can_be_called_after_finish() {
     scheduler
         .start_task("task-2", "private:2", OWNER_2, 1002)
         .expect("start second after finish");
-    assert_eq!(
-        scheduler.running_for("private:2").expect("running").task_id,
-        "task-2"
-    );
+    assert_eq!(scheduler.running_for("private:2").expect("running").task_id, "task-2");
 }
 
 #[test]

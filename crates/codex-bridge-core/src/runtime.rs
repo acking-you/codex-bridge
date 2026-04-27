@@ -311,9 +311,8 @@ fn warn_about_legacy_system_prompt(paths: &RuntimePaths) {
 /// Default template shipped as `model_capabilities.toml.example`. The
 /// real `model_capabilities.toml` is created by the operator by copying
 /// the example and filling in the api_key — it is gitignored.
-const DEFAULT_MODEL_CAPABILITIES_TEMPLATE: &str = include_str!(
-    "../assets/model_capabilities.toml.example"
-);
+const DEFAULT_MODEL_CAPABILITIES_TEMPLATE: &str =
+    include_str!("../assets/model_capabilities.toml.example");
 
 fn ensure_model_capabilities_example(path: &Path) -> Result<()> {
     if path.is_file() {

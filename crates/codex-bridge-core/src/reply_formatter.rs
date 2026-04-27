@@ -27,10 +27,11 @@ pub fn format_failure(message: &str) -> String {
 
 /// Return the help text describing trigger rules and local commands.
 pub fn format_help() -> String {
-    "触发方式：私聊默认会进来，但不是好友的私聊我接不到喔；群里要先 @我 才行。\
-     主人在私聊或群里 @我 就能用管理命令；群聊里其他人发起的任务仍然要等主人点头。\n\
-     命令：/help /status /queue /cancel /retry_last /clear /compact /approve <task_id> /deny \
-     <task_id>\n权限：全机可读，仅当前仓库可写，新文件只写到 .run/artifacts/，危险操作会被拒绝 _(:3」∠)_"
+    "触发方式：私聊默认会进来，但不是好友的私聊我接不到喔；群里要先 @我 才行。主人在私聊或群里 @我 \
+     就能用管理命令；群聊里其他人发起的任务仍然要等主人点头。\n命令：/help /status /queue /cancel \
+     /retry_last /clear /compact /approve <task_id> /deny \
+     <task_id>\n权限：全机可读，仅当前仓库可写，新文件只写到 .run/artifacts/，危险操作会被拒绝 \
+     _(:3」∠)_"
         .to_string()
 }
 
@@ -100,7 +101,8 @@ pub fn format_approval_expired() -> String {
 /// Render the admin-facing approval notice for one pending task.
 pub fn format_admin_approval_notice(pending: &PendingApproval) -> String {
     format!(
-        "待审批任务：{}\n来源：{}\n发起人：{} ({})\n消息：{}\n下面三条命令会分开发，直接复制其中一条就行。",
+        "待审批任务：{}\n来源：{}\n发起人：{} \
+         ({})\n消息：{}\n下面三条命令会分开发，直接复制其中一条就行。",
         pending.task_id,
         if pending.task.is_group { "群聊" } else { "私聊" },
         pending.task.source_sender_name,
@@ -112,7 +114,8 @@ pub fn format_admin_approval_notice(pending: &PendingApproval) -> String {
 /// Render the admin-facing approval notice for one pending group task.
 pub fn format_admin_group_approval_notice(pending: &PendingApproval) -> String {
     format!(
-        "群待审批任务：{}\n群号：{}\n发起人：{} ({})\n消息：{}\n批准方式：请对原群消息点敬礼表情。\n可选管理：/status {} /deny {}",
+        "群待审批任务：{}\n群号：{}\n发起人：{} \
+         ({})\n消息：{}\n批准方式：请对原群消息点敬礼表情。\n可选管理：/status {} /deny {}",
         pending.task_id,
         pending.task.reply_target_id,
         pending.task.source_sender_name,
