@@ -65,12 +65,18 @@ fn incoming_frame_from_value_distinguishes_event_and_response() {
             assert_eq!(event.message_id, 42);
             assert_eq!(event.sender_name, "alice");
         },
-        IncomingFrame::Event(_) | IncomingFrame::Response { .. } => {
+        IncomingFrame::Event(_)
+        | IncomingFrame::Response {
+            ..
+        } => {
             panic!("expected event");
         },
     }
     match response_frame {
-        IncomingFrame::Response { echo, payload } => {
+        IncomingFrame::Response {
+            echo,
+            payload,
+        } => {
             assert_eq!(echo, "abcd");
             assert_eq!(payload["status"], "ok");
         },
@@ -81,8 +87,10 @@ fn incoming_frame_from_value_distinguishes_event_and_response() {
 #[test]
 fn websocket_request_includes_bearer_token() {
     let config = RuntimeConfig::default();
-    let tokens =
-        RuntimeTokens { webui_token: "webui-token".to_string(), ws_token: "ws-token".to_string() };
+    let tokens = RuntimeTokens {
+        webui_token: "webui-token".to_string(),
+        ws_token: "ws-token".to_string(),
+    };
 
     let request = build_websocket_request(&config, &tokens).expect("build websocket request");
 
@@ -95,9 +103,15 @@ fn structured_group_outbound_action_contains_reply_at_and_image_segments() {
     let message = OutboundMessage {
         target: OutboundTarget::Group(777),
         segments: vec![
-            OutboundSegment::Reply { message_id: 9901 },
-            OutboundSegment::At { user_id: 42 },
-            OutboundSegment::Image { path: PathBuf::from("/tmp/result.png") },
+            OutboundSegment::Reply {
+                message_id: 9901,
+            },
+            OutboundSegment::At {
+                user_id: 42,
+            },
+            OutboundSegment::Image {
+                path: PathBuf::from("/tmp/result.png"),
+            },
         ],
     };
 

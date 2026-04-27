@@ -23,7 +23,9 @@ impl ApprovalGuard {
     pub fn new<P: Into<PathBuf>>(workspace_root: P) -> Self {
         let workspace_root = workspace_root.into();
 
-        Self { workspace_root }
+        Self {
+            workspace_root,
+        }
     }
 
     /// Review a command request and return an approval decision.

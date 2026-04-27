@@ -76,11 +76,17 @@ struct ScheduledRuntimeTask {
 
 impl ScheduledRuntimeTask {
     fn fresh(task: TaskRequest) -> Self {
-        Self { persisted_task_id: None, task }
+        Self {
+            persisted_task_id: None,
+            task,
+        }
     }
 
     fn persisted(task_id: String, task: TaskRequest) -> Self {
-        Self { persisted_task_id: Some(task_id), task }
+        Self {
+            persisted_task_id: Some(task_id),
+            task,
+        }
     }
 }
 
@@ -142,7 +148,9 @@ async fn handle_command(
     let (is_group, target_id) = (command.is_group, command.reply_target_id);
     let text = match command.command {
         ControlCommand::Help => reply_formatter::format_help(),
-        ControlCommand::Status { task_id: _ } => reply_formatter::format_status(
+        ControlCommand::Status {
+            task_id: _,
+        } => reply_formatter::format_status(
             scheduler.running(),
             scheduler.queue_len(),
             scheduler.last_terminal(),
@@ -157,8 +165,12 @@ async fn handle_command(
             .retry_candidate(&command.conversation_key, command.source_sender_id)
             .map(|task| format!("已重新排队：{}", task.task_id))
             .unwrap_or_else(|| "当前会话没有可重试的失败任务。".to_string()),
-        ControlCommand::Approve { task_id } => format!("审批能力尚未接入：{task_id}"),
-        ControlCommand::Deny { task_id } => format!("审批能力尚未接入：{task_id}"),
+        ControlCommand::Approve {
+            task_id,
+        } => format!("审批能力尚未接入：{task_id}"),
+        ControlCommand::Deny {
+            task_id,
+        } => format!("审批能力尚未接入：{task_id}"),
         ControlCommand::Clear => "上下文管理能力尚未接入。".to_string(),
         ControlCommand::Compact => "上下文管理能力尚未接入。".to_string(),
     };
@@ -463,7 +475,9 @@ impl TurnProgressSink for RuntimeProgressSink {
     }
 
     async fn commit_agent_message(&self, text: String) -> Result<()> {
-        let sink = ServiceReplySink { state: self.state.clone() };
+        let sink = ServiceReplySink {
+            state: self.state.clone(),
+        };
         match send_reply(&sink, self.is_group, self.reply_target_id, text).await {
             Ok(()) => {
                 self.state.mark_reply_sent(&self.reply_token).await?;
@@ -524,7 +538,11 @@ async fn execute_task_for_runtime(
     } else {
         None
     };
-    Ok(TaskExecutionOutcome { task_state: map_turn_state(&result.status), summary, final_reply })
+    Ok(TaskExecutionOutcome {
+        task_state: map_turn_state(&result.status),
+        summary,
+        final_reply,
+    })
 }
 
 async fn start_runtime_task(
@@ -533,7 +551,13 @@ async fn start_runtime_task(
     deps: RuntimeTaskDeps<'_>,
     already_promoted: bool,
 ) -> Result<(ActiveRuntimeTask, tokio::task::JoinHandle<Result<TaskExecutionOutcome>>)> {
-    let RuntimeTaskDeps { replies, state, codex, state_store, config: runtime_config } = deps;
+    let RuntimeTaskDeps {
+        replies,
+        state,
+        codex,
+        state_store,
+        config: runtime_config,
+    } = deps;
     let task = scheduled.task;
     let binding = resolve_binding(&task, codex.as_ref(), Some(state_store.as_ref())).await?;
     info!(
@@ -613,7 +637,14 @@ async fn start_runtime_task(
             reply_target_id: task.reply_target_id,
         },
     ));
-    Ok((ActiveRuntimeTask { task, active_turn, reply_token }, handle))
+    Ok((
+        ActiveRuntimeTask {
+            task,
+            active_turn,
+            reply_token,
+        },
+        handle,
+    ))
 }
 
 async fn enqueue_runtime_task(
@@ -777,7 +808,13 @@ async fn start_or_enqueue_runtime_task(
     let (active, handle) = start_runtime_task(
         scheduled,
         scheduler,
-        RuntimeTaskDeps { replies, state, codex, state_store, config },
+        RuntimeTaskDeps {
+            replies,
+            state,
+            codex,
+            state_store,
+            config,
+        },
         false,
     )
     .await?;
@@ -1174,7 +1211,9 @@ async fn handle_runtime_command(
             .await?;
             Ok(None)
         },
-        ControlCommand::Status { task_id } => {
+        ControlCommand::Status {
+            task_id,
+        } => {
             info!(
                 conversation = %command.conversation_key,
                 sender_id = command.source_sender_id,
@@ -1286,7 +1325,9 @@ async fn handle_runtime_command(
                 Ok(Some(ScheduledRuntimeTask::fresh(task)))
             }
         },
-        ControlCommand::Approve { task_id } => {
+        ControlCommand::Approve {
+            task_id,
+        } => {
             info!(
                 conversation = %command.conversation_key,
                 sender_id = command.source_sender_id,
@@ -1344,7 +1385,9 @@ async fn handle_runtime_command(
             .await?;
             Ok(None)
         },
-        ControlCommand::Deny { task_id } => {
+        ControlCommand::Deny {
+            task_id,
+        } => {
             info!(
                 conversation = %command.conversation_key,
                 sender_id = command.source_sender_id,
@@ -1467,7 +1510,9 @@ pub async fn run(
     let mut active_tasks: HashMap<String, ActiveRuntimeTask> = HashMap::new();
     let mut task_joins: FuturesUnordered<TaggedJoin> = FuturesUnordered::new();
     let mut approval_tick = tokio::time::interval(Duration::from_secs(1));
-    let replies = ServiceReplySink { state: state.clone() };
+    let replies = ServiceReplySink {
+        state: state.clone(),
+    };
     recover_running_tasks(&state_store, &mut scheduler).await?;
     refresh_snapshot(
         &state,
@@ -1802,7 +1847,9 @@ fn service_command_to_router_command(
     command: crate::service::ServiceCommand,
 ) -> Option<CommandRequest> {
     match command {
-        crate::service::ServiceCommand::Control { command } => Some(command),
+        crate::service::ServiceCommand::Control {
+            command,
+        } => Some(command),
         _ => None,
     }
 }

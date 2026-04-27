@@ -116,7 +116,9 @@ impl StateStore {
         }
 
         let conn = Connection::open(path).context("open sqlite state database")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+        };
         store.migrate_and_seed()?;
         Ok(store)
     }
@@ -124,7 +126,9 @@ impl StateStore {
     /// Open a new in-memory state store and run migrations.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("open in-memory sqlite state database")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+        };
         store.migrate_and_seed()?;
         Ok(store)
     }
@@ -151,7 +155,10 @@ impl StateStore {
              WHERE conversation_key = ?1",
         )?;
         stmt.query_row((conversation_key,), |row| {
-            Ok(ConversationBinding { conversation_key: row.get(0)?, thread_id: row.get(1)? })
+            Ok(ConversationBinding {
+                conversation_key: row.get(0)?,
+                thread_id: row.get(1)?,
+            })
         })
         .optional()
         .context("query conversation binding")
@@ -161,10 +168,9 @@ impl StateStore {
     pub fn delete_binding(&self, conversation_key: &str) -> Result<bool> {
         let deleted = self
             .conn
-            .execute(
-                "DELETE FROM conversation_bindings WHERE conversation_key = ?1",
-                params![conversation_key],
-            )
+            .execute("DELETE FROM conversation_bindings WHERE conversation_key = ?1", params![
+                conversation_key
+            ])
             .context("delete conversation binding")?;
         Ok(deleted == 1)
     }
@@ -248,10 +254,10 @@ impl StateStore {
     pub fn update_task_status(&self, task_id: &str, status: TaskStatus) -> Result<()> {
         let updated = self
             .conn
-            .execute(
-                "UPDATE task_runs SET status = ?1 WHERE task_id = ?2",
-                params![status.as_str(), task_id],
-            )
+            .execute("UPDATE task_runs SET status = ?1 WHERE task_id = ?2", params![
+                status.as_str(),
+                task_id
+            ])
             .context("update task status")?;
         if updated == 1 {
             Ok(())
@@ -344,10 +350,10 @@ impl StateStore {
     pub fn mark_running_tasks_interrupted(&self) -> Result<usize> {
         let updated = self
             .conn
-            .execute(
-                "UPDATE task_runs SET status = ?1 WHERE status = ?2",
-                params![TaskStatus::Interrupted.as_str(), TaskStatus::Running.as_str()],
-            )
+            .execute("UPDATE task_runs SET status = ?1 WHERE status = ?2", params![
+                TaskStatus::Interrupted.as_str(),
+                TaskStatus::Running.as_str()
+            ])
             .context("mark running tasks interrupted")?;
         Ok(updated)
     }
@@ -356,10 +362,10 @@ impl StateStore {
     pub fn mark_pending_tasks_expired(&self) -> Result<usize> {
         let updated = self
             .conn
-            .execute(
-                "UPDATE task_runs SET status = ?1 WHERE status = ?2",
-                params![TaskStatus::Expired.as_str(), TaskStatus::PendingApproval.as_str()],
-            )
+            .execute("UPDATE task_runs SET status = ?1 WHERE status = ?2", params![
+                TaskStatus::Expired.as_str(),
+                TaskStatus::PendingApproval.as_str()
+            ])
             .context("mark pending approval tasks expired")?;
         Ok(updated)
     }

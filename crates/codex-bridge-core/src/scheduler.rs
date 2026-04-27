@@ -94,17 +94,15 @@ impl Scheduler {
             "attempted to start a second concurrent task on conversation {conversation_key}"
         );
         self.ready_lane_keys.remove(conversation_key);
-        self.running.insert(
-            conversation_key.to_string(),
-            TaskSummary {
+        self.running
+            .insert(conversation_key.to_string(), TaskSummary {
                 task_id: task_id.to_string(),
                 conversation_key: conversation_key.to_string(),
                 owner_sender_id,
                 source_message_id,
                 state: TaskState::Running,
                 summary: None,
-            },
-        );
+            });
         Ok(())
     }
 
@@ -289,7 +287,10 @@ impl Scheduler {
         self.ready_lane_keys.remove(conversation_key);
         let list = self.queued.get_mut(conversation_key)?;
         let next = list.pop_front()?;
-        let running = TaskSummary { state: TaskState::Running, ..next };
+        let running = TaskSummary {
+            state: TaskState::Running,
+            ..next
+        };
         self.running
             .insert(conversation_key.to_string(), running.clone());
         if list.is_empty() {

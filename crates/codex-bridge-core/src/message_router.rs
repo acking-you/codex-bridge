@@ -105,7 +105,12 @@ pub struct MessageDeduper {
 impl MessageDeduper {
     /// Build a deduper with explicit window size and retention count.
     pub fn new(max_entries: usize, window: Duration) -> Self {
-        Self { max_entries, window, seen: HashMap::new(), order: VecDeque::new() }
+        Self {
+            max_entries,
+            window,
+            seen: HashMap::new(),
+            order: VecDeque::new(),
+        }
     }
 
     /// Return `true` when the message id was not seen in the current window.
@@ -265,18 +270,18 @@ fn parse_command(text: &str) -> Option<ControlCommand> {
     let mut parts = text.split_whitespace();
     match parts.next() {
         Some("/help") => Some(ControlCommand::Help),
-        Some("/status") => {
-            Some(ControlCommand::Status { task_id: parts.next().map(ToString::to_string) })
-        },
+        Some("/status") => Some(ControlCommand::Status {
+            task_id: parts.next().map(ToString::to_string),
+        }),
         Some("/queue") => Some(ControlCommand::Queue),
         Some("/cancel") => Some(ControlCommand::Cancel),
         Some("/retry_last") => Some(ControlCommand::RetryLast),
-        Some("/approve") => parts
-            .next()
-            .map(|task_id| ControlCommand::Approve { task_id: task_id.to_string() }),
-        Some("/deny") => parts
-            .next()
-            .map(|task_id| ControlCommand::Deny { task_id: task_id.to_string() }),
+        Some("/approve") => parts.next().map(|task_id| ControlCommand::Approve {
+            task_id: task_id.to_string(),
+        }),
+        Some("/deny") => parts.next().map(|task_id| ControlCommand::Deny {
+            task_id: task_id.to_string(),
+        }),
         Some("/clear") => Some(ControlCommand::Clear),
         Some("/compact") => Some(ControlCommand::Compact),
         _ => None,

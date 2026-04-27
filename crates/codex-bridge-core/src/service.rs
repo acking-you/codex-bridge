@@ -69,7 +69,12 @@ pub struct TaskSnapshot {
 
 impl Default for SessionSnapshot {
     fn default() -> Self {
-        Self { status: SessionStatus::Booting, self_id: None, nickname: None, qq_pid: None }
+        Self {
+            status: SessionStatus::Booting,
+            self_id: None,
+            nickname: None,
+            qq_pid: None,
+        }
     }
 }
 
@@ -204,7 +209,10 @@ impl ServiceState {
         let (control_tx, mut control_rx) = mpsc::channel(64);
         spawn(async move {
             while let Some(command) = control_rx.recv().await {
-                let ServiceCommand::Control { command: _ } = command else {
+                let ServiceCommand::Control {
+                    command: _,
+                } = command
+                else {
                     continue;
                 };
             }
@@ -258,34 +266,53 @@ impl ServiceState {
         tokio::spawn(async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    ServiceCommand::SendPrivate { user_id, text, respond_to } => {
+                    ServiceCommand::SendPrivate {
+                        user_id,
+                        text,
+                        respond_to,
+                    } => {
                         let _ = respond_to.send(Ok(SendMessageReceipt {
                             message_id: user_id.saturating_add(text.len() as i64),
                         }));
                     },
-                    ServiceCommand::SendGroup { group_id, text, respond_to } => {
+                    ServiceCommand::SendGroup {
+                        group_id,
+                        text,
+                        respond_to,
+                    } => {
                         let _ = respond_to.send(Ok(SendMessageReceipt {
                             message_id: group_id.saturating_add(text.len() as i64),
                         }));
                     },
-                    ServiceCommand::SendOutbound { message, respond_to } => {
+                    ServiceCommand::SendOutbound {
+                        message,
+                        respond_to,
+                    } => {
                         let _ = respond_to.send(Ok(SendMessageReceipt {
                             message_id: 10_000 + message.segments.len() as i64,
                         }));
                     },
-                    ServiceCommand::SetMessageReaction { respond_to, .. } => {
+                    ServiceCommand::SetMessageReaction {
+                        respond_to, ..
+                    } => {
                         let _ = respond_to.send(Ok(()));
                     },
-                    ServiceCommand::FetchMessage { respond_to, .. } => {
+                    ServiceCommand::FetchMessage {
+                        respond_to, ..
+                    } => {
                         let _ = respond_to
                             .send(Err(anyhow!("FetchMessage is not available in for_tests")));
                     },
-                    ServiceCommand::FetchConversationHistory { respond_to, .. } => {
+                    ServiceCommand::FetchConversationHistory {
+                        respond_to, ..
+                    } => {
                         let _ = respond_to.send(Err(anyhow!(
                             "FetchConversationHistory is not available in for_tests"
                         )));
                     },
-                    ServiceCommand::Control { command: _ } => {},
+                    ServiceCommand::Control {
+                        command: _,
+                    } => {},
                 }
             }
         });
@@ -400,7 +427,11 @@ impl ServiceState {
         let (respond_to, response_rx) = oneshot::channel();
         self.inner
             .command_tx
-            .send(ServiceCommand::SendPrivate { user_id, text, respond_to })
+            .send(ServiceCommand::SendPrivate {
+                user_id,
+                text,
+                respond_to,
+            })
             .await
             .map_err(|_| anyhow!("bridge worker is not available"))?;
         response_rx
@@ -417,7 +448,11 @@ impl ServiceState {
         let (respond_to, response_rx) = oneshot::channel();
         self.inner
             .command_tx
-            .send(ServiceCommand::SendGroup { group_id, text, respond_to })
+            .send(ServiceCommand::SendGroup {
+                group_id,
+                text,
+                respond_to,
+            })
             .await
             .map_err(|_| anyhow!("bridge worker is not available"))?;
         response_rx
@@ -433,7 +468,10 @@ impl ServiceState {
         let (respond_to, response_rx) = oneshot::channel();
         self.inner
             .command_tx
-            .send(ServiceCommand::SendOutbound { message, respond_to })
+            .send(ServiceCommand::SendOutbound {
+                message,
+                respond_to,
+            })
             .await
             .map_err(|_| anyhow!("bridge worker is not available"))?;
         response_rx
@@ -446,7 +484,11 @@ impl ServiceState {
         let (respond_to, response_rx) = oneshot::channel();
         self.inner
             .command_tx
-            .send(ServiceCommand::SetMessageReaction { message_id, emoji_id, respond_to })
+            .send(ServiceCommand::SetMessageReaction {
+                message_id,
+                emoji_id,
+                respond_to,
+            })
             .await
             .map_err(|_| anyhow!("bridge worker is not available"))?;
         response_rx
@@ -467,7 +509,11 @@ impl ServiceState {
         let (respond_to, response_rx) = oneshot::channel();
         self.inner
             .command_tx
-            .send(ServiceCommand::FetchMessage { message_id, self_id, respond_to })
+            .send(ServiceCommand::FetchMessage {
+                message_id,
+                self_id,
+                respond_to,
+            })
             .await
             .map_err(|_| anyhow!("bridge worker is not available"))?;
         response_rx
@@ -505,7 +551,9 @@ impl ServiceState {
     pub async fn send_control_command(&self, command: CommandRequest) -> Result<()> {
         self.inner
             .control_tx
-            .send(ServiceCommand::Control { command })
+            .send(ServiceCommand::Control {
+                command,
+            })
             .await
             .map_err(|_| anyhow!("orchestrator is not available"))?;
         Ok(())

@@ -40,7 +40,11 @@ fn parse_retry_last_command() {
 fn parse_reply_text_command() {
     let cli = Cli::try_parse_from(["codex-bridge", "reply", "--text", "hello"])
         .expect("parse reply text");
-    assert!(matches!(cli.command, Commands::Reply { text: Some(_), image: None, file: None }));
+    assert!(matches!(cli.command, Commands::Reply {
+        text: Some(_),
+        image: None,
+        file: None
+    }));
 }
 
 #[test]

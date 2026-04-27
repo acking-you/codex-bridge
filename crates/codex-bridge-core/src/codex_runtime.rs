@@ -139,7 +139,9 @@ struct ChildGuard {
 
 impl ChildGuard {
     fn new(child: Child) -> Self {
-        Self { child: StdMutex::new(Some(child)) }
+        Self {
+            child: StdMutex::new(Some(child)),
+        }
     }
 }
 
@@ -293,7 +295,11 @@ impl RecentOutputTracker {
         let entry = self
             .active
             .entry(item_id.to_string())
-            .or_insert_with(|| LiveOutputEntry { kind, text: String::new(), order });
+            .or_insert_with(|| LiveOutputEntry {
+                kind,
+                text: String::new(),
+                order,
+            });
         if entry.kind != kind {
             entry.kind = kind;
             entry.text.clear();
@@ -308,16 +314,21 @@ impl RecentOutputTracker {
         item: &ThreadItem,
     ) -> (Option<Vec<String>>, Option<CommittedLiveOutput>) {
         let (item_id, kind, explicit_text) = match item {
-            ThreadItem::AgentMessage { id, text, .. } => {
-                (id.as_str(), LiveOutputKind::AgentMessage, Some(text.clone()))
-            },
-            ThreadItem::Plan { id, text } => {
-                (id.as_str(), LiveOutputKind::Plan, Some(text.clone()))
-            },
-            ThreadItem::CommandExecution { id, .. } => {
-                (id.as_str(), LiveOutputKind::CommandExecution, None)
-            },
-            ThreadItem::FileChange { id, .. } => (id.as_str(), LiveOutputKind::FileChange, None),
+            ThreadItem::AgentMessage {
+                id,
+                text,
+                ..
+            } => (id.as_str(), LiveOutputKind::AgentMessage, Some(text.clone())),
+            ThreadItem::Plan {
+                id,
+                text,
+            } => (id.as_str(), LiveOutputKind::Plan, Some(text.clone())),
+            ThreadItem::CommandExecution {
+                id, ..
+            } => (id.as_str(), LiveOutputKind::CommandExecution, None),
+            ThreadItem::FileChange {
+                id, ..
+            } => (id.as_str(), LiveOutputKind::FileChange, None),
             _ => return (None, None),
         };
 
@@ -332,8 +343,11 @@ impl RecentOutputTracker {
 
         let kind = active.map(|entry| entry.kind).unwrap_or(kind);
         let order = self.bump_order();
-        self.committed
-            .push_back(LiveOutputEntry { kind, text: recent_text.clone(), order });
+        self.committed.push_back(LiveOutputEntry {
+            kind,
+            text: recent_text.clone(),
+            order,
+        });
         while self.committed.len() > RECENT_OUTPUT_LIMIT {
             let _ = self.committed.pop_front();
         }
@@ -598,7 +612,10 @@ impl CodexRuntime {
                 ServerNotification::TurnCompleted(payload)
                     if payload.thread_id == thread_id && payload.turn.id == turn_id =>
                 {
-                    return Ok(TurnCompletion { turn: payload.turn, items });
+                    return Ok(TurnCompletion {
+                        turn: payload.turn,
+                        items,
+                    });
                 },
                 _ => {},
             }
@@ -651,7 +668,10 @@ async fn reader_loop(
             },
         };
         match message {
-            JSONRPCMessage::Response(JSONRPCResponse { id, result }) => {
+            JSONRPCMessage::Response(JSONRPCResponse {
+                id,
+                result,
+            }) => {
                 let waiter = demuxer.pending_responses.lock().await.remove(&id);
                 if let Some(tx) = waiter {
                     let _ = tx.send(ResponseOutcome::Ok(result));
@@ -719,7 +739,10 @@ async fn approval_loop(
         };
         log_server_request(&request);
         match request {
-            ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
+            ServerRequest::CommandExecutionRequestApproval {
+                request_id,
+                params,
+            } => {
                 let response = build_command_approval_response(&guard, &params);
                 info!(
                     decision = ?response.decision,
@@ -731,7 +754,10 @@ async fn approval_loop(
                     warn!(%error, "failed to write command approval response");
                 }
             },
-            ServerRequest::FileChangeRequestApproval { request_id, params } => {
+            ServerRequest::FileChangeRequestApproval {
+                request_id,
+                params,
+            } => {
                 let response = build_file_change_approval_response(&guard, &params);
                 info!(
                     decision = ?response.decision,
@@ -880,7 +906,10 @@ impl CodexExecutor for CodexRuntime {
             };
         info!(thread_id, turn_id = %response.turn.id, "codex turn started");
 
-        Ok(ActiveTurn { thread_id: thread_id.to_string(), turn_id: response.turn.id })
+        Ok(ActiveTurn {
+            thread_id: thread_id.to_string(),
+            turn_id: response.turn.id,
+        })
     }
 
     async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult> {
@@ -984,7 +1013,13 @@ async fn spawn_protocol_state(
         .take()
         .context("capture codex-app-server stdout")?;
 
-    Ok((child, RuntimeWriteState { stdin: BufWriter::new(stdin) }, BufReader::new(stdout)))
+    Ok((
+        child,
+        RuntimeWriteState {
+            stdin: BufWriter::new(stdin),
+        },
+        BufReader::new(stdout),
+    ))
 }
 
 /// Return a short safe description for one server notification.
@@ -1064,7 +1099,9 @@ fn log_server_notification(notification: &ServerNotification) {
 
 fn log_server_request(request: &ServerRequest) {
     match request {
-        ServerRequest::CommandExecutionRequestApproval { params, .. } => {
+        ServerRequest::CommandExecutionRequestApproval {
+            params, ..
+        } => {
             info!(
                 request = "commandApproval",
                 thread_id = %params.thread_id,
@@ -1075,7 +1112,9 @@ fn log_server_request(request: &ServerRequest) {
                 "codex approval requested"
             );
         },
-        ServerRequest::FileChangeRequestApproval { params, .. } => {
+        ServerRequest::FileChangeRequestApproval {
+            params, ..
+        } => {
             info!(
                 request = "fileChangeApproval",
                 thread_id = %params.thread_id,
@@ -1264,7 +1303,9 @@ pub fn build_thread_resume_params(
 
 /// Build `thread/compact/start` params for one existing thread.
 pub fn build_thread_compact_start_params(thread_id: &str) -> ThreadCompactStartParams {
-    ThreadCompactStartParams { thread_id: thread_id.to_string() }
+    ThreadCompactStartParams {
+        thread_id: thread_id.to_string(),
+    }
 }
 
 /// Assemble the five-layer developer instructions handed to Codex at
@@ -1341,14 +1382,22 @@ fn discover_project_skills(workspace_root: &Path) -> Result<Vec<UserInput>> {
         let skill_name = entry.file_name().to_string_lossy().into_owned();
         let skill_path = entry.path().join("SKILL.md");
         if skill_path.is_file() {
-            skills.push(UserInput::Skill { name: skill_name, path: skill_path });
+            skills.push(UserInput::Skill {
+                name: skill_name,
+                path: skill_path,
+            });
         }
     }
 
     skills.sort_by(|left, right| match (left, right) {
-        (UserInput::Skill { name: left, .. }, UserInput::Skill { name: right, .. }) => {
-            left.cmp(right)
-        },
+        (
+            UserInput::Skill {
+                name: left, ..
+            },
+            UserInput::Skill {
+                name: right, ..
+            },
+        ) => left.cmp(right),
         _ => std::cmp::Ordering::Equal,
     });
 
@@ -1377,8 +1426,10 @@ pub fn build_turn_start_params(
     thread_id: &str,
     input_text: &str,
 ) -> Result<TurnStartParams> {
-    let mut input =
-        vec![UserInput::Text { text: input_text.to_string(), text_elements: Vec::new() }];
+    let mut input = vec![UserInput::Text {
+        text: input_text.to_string(),
+        text_elements: Vec::new(),
+    }];
     input.extend(discover_project_skills(&config.workspace_root)?);
 
     Ok(TurnStartParams {
@@ -1394,7 +1445,10 @@ pub fn build_turn_start_params(
 
 /// Build `turn/interrupt` params for the active turn.
 pub fn build_turn_interrupt_params(thread_id: &str, turn_id: &str) -> TurnInterruptParams {
-    TurnInterruptParams { thread_id: thread_id.to_string(), turn_id: turn_id.to_string() }
+    TurnInterruptParams {
+        thread_id: thread_id.to_string(),
+        turn_id: turn_id.to_string(),
+    }
 }
 
 /// Extract all agent/assistant text messages from completed turn items.
@@ -1477,7 +1531,9 @@ pub fn build_command_approval_response(
         ApprovalDecision::Deny(_) => CommandExecutionApprovalDecision::Decline,
     };
 
-    CommandExecutionRequestApprovalResponse { decision }
+    CommandExecutionRequestApprovalResponse {
+        decision,
+    }
 }
 
 /// Build the file-change approval response under the local workspace policy.
@@ -1490,7 +1546,9 @@ pub fn build_file_change_approval_response(
         ApprovalDecision::Deny(_) => FileChangeApprovalDecision::Decline,
     };
 
-    FileChangeRequestApprovalResponse { decision }
+    FileChangeRequestApprovalResponse {
+        decision,
+    }
 }
 
 fn requests_additional_permissions(params: &CommandExecutionRequestApprovalParams) -> bool {

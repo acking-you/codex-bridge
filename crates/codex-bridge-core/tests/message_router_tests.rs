@@ -105,7 +105,9 @@ fn group_mention_status_routes_to_command() {
     assert_eq!(
         decision,
         RouteDecision::Command(CommandRequest {
-            command: ControlCommand::Status { task_id: None },
+            command: ControlCommand::Status {
+                task_id: None
+            },
             conversation_key: "group:777".to_string(),
             reply_target_id: 777,
             is_group: true,
@@ -140,7 +142,9 @@ fn private_status_command_has_context() {
     assert_eq!(
         decision,
         RouteDecision::Command(CommandRequest {
-            command: ControlCommand::Status { task_id: None },
+            command: ControlCommand::Status {
+                task_id: None
+            },
             conversation_key: "private:11".to_string(),
             reply_target_id: 11,
             is_group: false,
@@ -175,7 +179,9 @@ fn private_approve_command_keeps_task_id() {
     assert_eq!(
         decision,
         RouteDecision::Command(CommandRequest {
-            command: ControlCommand::Approve { task_id: "task-123".to_string() },
+            command: ControlCommand::Approve {
+                task_id: "task-123".to_string()
+            },
             conversation_key: "private:11".to_string(),
             reply_target_id: 11,
             is_group: false,
@@ -203,7 +209,10 @@ fn clear_command_routes_from_private_chat() {
     let decision = router.route_event(event).expect("route decision");
     assert!(matches!(
         decision,
-        RouteDecision::Command(CommandRequest { command: ControlCommand::Clear, .. })
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Clear,
+            ..
+        })
     ));
 }
 
@@ -224,7 +233,10 @@ fn compact_command_routes_from_private_chat() {
     let decision = router.route_event(event).expect("route decision");
     assert!(matches!(
         decision,
-        RouteDecision::Command(CommandRequest { command: ControlCommand::Compact, .. })
+        RouteDecision::Command(CommandRequest {
+            command: ControlCommand::Compact,
+            ..
+        })
     ));
 }
 

@@ -60,7 +60,10 @@ impl AdminConfig {
                 bail!("trusted_group_ids entries must be positive QQ group ids");
             }
         }
-        Ok(Self { admin_user_id: raw.admin_user_id, trusted_group_ids: raw.trusted_group_ids })
+        Ok(Self {
+            admin_user_id: raw.admin_user_id,
+            trusted_group_ids: raw.trusted_group_ids,
+        })
     }
 }
 
@@ -141,7 +144,12 @@ pub struct PendingApproval {
 impl PendingApproval {
     /// Create a pending approval entry from a task and timeout.
     pub fn new(task_id: String, task: TaskRequest, created_at: Instant, timeout: Duration) -> Self {
-        Self { task_id, task, created_at, expires_at: created_at + timeout }
+        Self {
+            task_id,
+            task,
+            created_at,
+            expires_at: created_at + timeout,
+        }
     }
 }
 
@@ -167,7 +175,11 @@ pub struct PendingApprovalPool {
 impl PendingApprovalPool {
     /// Create a new bounded pending-approval pool.
     pub fn new(capacity: usize) -> Self {
-        Self { by_task_id: HashMap::new(), by_conversation: HashMap::new(), capacity }
+        Self {
+            by_task_id: HashMap::new(),
+            by_conversation: HashMap::new(),
+            capacity,
+        }
     }
 
     /// Insert a pending approval request.

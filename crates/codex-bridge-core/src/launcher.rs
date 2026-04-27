@@ -59,7 +59,10 @@ pub async fn prepare_launch(project_root: &Path, config: &RuntimeConfig) -> Resu
     ensure_workspace_built(&paths).await?;
     let tokens = prepare_runtime_state_with_defaults(&paths, config)?;
     patch_qq_resources(&paths)?;
-    Ok(PreparedLaunch { paths, tokens })
+    Ok(PreparedLaunch {
+        paths,
+        tokens,
+    })
 }
 
 /// Launch QQ in the foreground, stream logs to stdout, and write a launcher

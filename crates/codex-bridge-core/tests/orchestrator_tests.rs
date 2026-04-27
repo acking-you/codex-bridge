@@ -172,7 +172,10 @@ impl CodexExecutor for FakeCodexExecutor {
     }
 
     async fn start_turn(&self, thread_id: &str, _input_text: &str) -> Result<ActiveTurn> {
-        Ok(ActiveTurn { thread_id: thread_id.to_string(), turn_id: self.turn_id.clone() })
+        Ok(ActiveTurn {
+            thread_id: thread_id.to_string(),
+            turn_id: self.turn_id.clone(),
+        })
     }
 
     async fn wait_for_turn(&self, active_turn: &ActiveTurn) -> Result<CodexTurnResult> {
@@ -369,22 +372,41 @@ fn spawn_bridge_sink(
     tokio::spawn(async move {
         while let Some(command) = command_rx.recv().await {
             match command {
-                ServiceCommand::SendPrivate { text, respond_to, .. } => {
+                ServiceCommand::SendPrivate {
+                    text,
+                    respond_to,
+                    ..
+                } => {
                     sent_messages.lock().expect("messages").push(text);
-                    let _ = respond_to.send(Ok(SendMessageReceipt { message_id: 1 }));
+                    let _ = respond_to.send(Ok(SendMessageReceipt {
+                        message_id: 1,
+                    }));
                 },
-                ServiceCommand::SendGroup { text, respond_to, .. } => {
+                ServiceCommand::SendGroup {
+                    text,
+                    respond_to,
+                    ..
+                } => {
                     sent_messages.lock().expect("messages").push(text);
-                    let _ = respond_to.send(Ok(SendMessageReceipt { message_id: 1 }));
+                    let _ = respond_to.send(Ok(SendMessageReceipt {
+                        message_id: 1,
+                    }));
                 },
-                ServiceCommand::SetMessageReaction { message_id, emoji_id, respond_to } => {
+                ServiceCommand::SetMessageReaction {
+                    message_id,
+                    emoji_id,
+                    respond_to,
+                } => {
                     sent_messages
                         .lock()
                         .expect("messages")
                         .push(format!("REACTION:{message_id}:{emoji_id}"));
                     let _ = respond_to.send(Ok(()));
                 },
-                ServiceCommand::SendOutbound { message, respond_to } => {
+                ServiceCommand::SendOutbound {
+                    message,
+                    respond_to,
+                } => {
                     sent_messages.lock().expect("messages").push(format!(
                         "OUTBOUND:{}:{}",
                         match message.target {
@@ -397,14 +419,22 @@ fn spawn_bridge_sink(
                         },
                         message.segments.len()
                     ));
-                    let _ = respond_to.send(Ok(SendMessageReceipt { message_id: 1 }));
+                    let _ = respond_to.send(Ok(SendMessageReceipt {
+                        message_id: 1,
+                    }));
                 },
-                ServiceCommand::Control { .. } => {},
-                ServiceCommand::FetchMessage { respond_to, .. } => {
+                ServiceCommand::Control {
+                    ..
+                } => {},
+                ServiceCommand::FetchMessage {
+                    respond_to, ..
+                } => {
                     let _ =
                         respond_to.send(Err(anyhow::anyhow!("FetchMessage stubbed out in tests")));
                 },
-                ServiceCommand::FetchConversationHistory { respond_to, .. } => {
+                ServiceCommand::FetchConversationHistory {
+                    respond_to, ..
+                } => {
                     let _ = respond_to.send(Err(anyhow::anyhow!(
                         "FetchConversationHistory stubbed out in tests"
                     )));
@@ -807,10 +837,9 @@ async fn approve_command_rejects_group_pending_task() {
     .expect("pending task appears");
 
     state
-        .send_control_command(make_command_request_from(
-            2_394_626_220,
-            ControlCommand::Approve { task_id: pending.task_id.clone() },
-        ))
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
+            task_id: pending.task_id.clone(),
+        }))
         .await
         .expect("approve command");
 
@@ -1071,7 +1100,9 @@ async fn admin_group_status_command_is_allowed() {
         .send_control_command(make_group_command_request(
             2_394_626_220,
             777,
-            ControlCommand::Status { task_id: None },
+            ControlCommand::Status {
+                task_id: None,
+            },
         ))
         .await
         .expect("status command");
@@ -1117,11 +1148,9 @@ async fn non_admin_group_status_command_is_rejected() {
     wait_for_snapshot_prompt_file(&state).await;
 
     state
-        .send_control_command(make_group_command_request(
-            42,
-            777,
-            ControlCommand::Status { task_id: None },
-        ))
+        .send_control_command(make_group_command_request(42, 777, ControlCommand::Status {
+            task_id: None,
+        }))
         .await
         .expect("status command");
 
@@ -1441,7 +1470,11 @@ async fn non_admin_friend_private_message_waits_for_admin_approval() {
     ));
     wait_for_snapshot_prompt_file(&state).await;
     state
-        .set_friends(vec![FriendProfile { user_id: 42, nickname: "LB".to_string(), remark: None }])
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
         .await;
 
     state.publish_event(make_private_event(6001, "帮我跑个任务"));
@@ -1483,10 +1516,9 @@ async fn non_admin_friend_private_message_waits_for_admin_approval() {
         .any(|text| text == &format!("/status {}", pending.task_id)));
 
     state
-        .send_control_command(make_command_request_from(
-            2_394_626_220,
-            ControlCommand::Approve { task_id: pending.task_id.clone() },
-        ))
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
+            task_id: pending.task_id.clone(),
+        }))
         .await
         .expect("approve pending task");
 
@@ -1570,10 +1602,9 @@ async fn admin_status_shows_recent_live_output_for_running_task() {
     .expect("recent output should appear in snapshot");
 
     state
-        .send_control_command(make_command_request_from(
-            2_394_626_220,
-            ControlCommand::Status { task_id: None },
-        ))
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Status {
+            task_id: None,
+        }))
         .await
         .expect("request status");
 
@@ -1681,7 +1712,11 @@ async fn duplicate_pending_approval_from_same_conversation_is_rejected() {
     ));
     wait_for_snapshot_prompt_file(&state).await;
     state
-        .set_friends(vec![FriendProfile { user_id: 42, nickname: "LB".to_string(), remark: None }])
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
         .await;
 
     state.publish_event(make_private_event(6101, "第一条"));
@@ -1731,7 +1766,11 @@ async fn pending_approval_expires_without_admin_reply() {
     ));
     wait_for_snapshot_prompt_file(&state).await;
     state
-        .set_friends(vec![FriendProfile { user_id: 42, nickname: "LB".to_string(), remark: None }])
+        .set_friends(vec![FriendProfile {
+            user_id: 42,
+            nickname: "LB".to_string(),
+            remark: None,
+        }])
         .await;
 
     state.publish_event(make_private_event(6201, "等审批超时"));
