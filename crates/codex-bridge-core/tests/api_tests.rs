@@ -465,9 +465,7 @@ async fn capability_invoke_returns_stub_text() {
             &self,
             input: &CapabilityInput,
         ) -> Result<CapabilityOutput, CapabilityError> {
-            Ok(CapabilityOutput::Text {
-                text: format!("echoed: {}", input.prompt),
-            })
+            Ok(CapabilityOutput::Text { text: format!("echoed: {}", input.prompt) })
         }
     }
 

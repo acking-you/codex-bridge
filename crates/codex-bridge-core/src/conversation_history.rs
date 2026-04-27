@@ -114,8 +114,5 @@ pub fn apply_history_query(
         })
         .collect::<Vec<_>>();
 
-    HistoryQueryResult {
-        truncated: messages.len() >= scanned_limit,
-        messages,
-    }
+    HistoryQueryResult { truncated: messages.len() >= scanned_limit, messages }
 }

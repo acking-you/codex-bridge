@@ -19,19 +19,14 @@ pub struct WorkspaceGuard {
 impl WorkspaceGuard {
     /// Build a guard for the repository root and writable artifacts root.
     pub fn new(repo_root: impl Into<PathBuf>, artifacts_root: impl Into<PathBuf>) -> Self {
-        Self {
-            repo_root: repo_root.into(),
-            artifacts_root: artifacts_root.into(),
-        }
+        Self { repo_root: repo_root.into(), artifacts_root: artifacts_root.into() }
     }
 
     /// Apply permission shaping and return a restore handle.
     pub fn apply(&self) -> Result<WorkspaceLease> {
         let mut original_modes = Vec::new();
         self.walk_and_apply(&self.repo_root, &mut original_modes)?;
-        Ok(WorkspaceLease {
-            original_modes,
-        })
+        Ok(WorkspaceLease { original_modes })
     }
 
     fn walk_and_apply(&self, path: &Path, original_modes: &mut Vec<(PathBuf, u32)>) -> Result<()> {

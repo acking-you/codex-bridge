@@ -105,9 +105,7 @@ fn group_message_event_falls_back_when_at_segment_has_no_name() {
 
     let event = NormalizedEvent::try_from(raw).expect("normalize group message");
     match event {
-        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
-            text, ..
-        }) => {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent { text, .. }) => {
             assert_eq!(text, "@<bot> ping @<QQ:67890>");
         },
         other => panic!("unexpected event: {other:?}"),
@@ -228,9 +226,7 @@ fn group_message_event_quoted_id_is_none_without_reply_segment() {
 
     let event = NormalizedEvent::try_from(raw).expect("normalize group message");
     match event {
-        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
-            quoted_message_id, ..
-        }) => {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent { quoted_message_id, .. }) => {
             assert_eq!(quoted_message_id, None);
         },
         other => panic!("unexpected event: {other:?}"),
@@ -280,9 +276,7 @@ fn malformed_reply_segment_id_yields_none() {
 
     let event = NormalizedEvent::try_from(raw).expect("normalize group message");
     match event {
-        NormalizedEvent::GroupMessageReceived(GroupMessageEvent {
-            quoted_message_id, ..
-        }) => {
+        NormalizedEvent::GroupMessageReceived(GroupMessageEvent { quoted_message_id, .. }) => {
             assert_eq!(quoted_message_id, None);
         },
         other => panic!("unexpected event: {other:?}"),

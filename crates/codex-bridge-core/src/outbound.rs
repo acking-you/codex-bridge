@@ -109,14 +109,7 @@ impl ReplyRequest {
         self,
         context: &ActiveReplyContext,
     ) -> Result<(ReplyPayload, Vec<i64>, Option<i64>)> {
-        let Self {
-            token: _,
-            text,
-            image,
-            file,
-            at,
-            reply_to,
-        } = self;
+        let Self { token: _, text, image, file, at, reply_to } = self;
         let variants = usize::from(text.is_some())
             + usize::from(image.is_some())
             + usize::from(file.is_some());
@@ -134,9 +127,7 @@ impl ReplyRequest {
 
         if let Some(path) = image {
             return Ok((
-                ReplyPayload::Image {
-                    path: resolve_artifact_path(&path, context)?,
-                },
+                ReplyPayload::Image { path: resolve_artifact_path(&path, context)? },
                 at,
                 reply_to,
             ));
@@ -148,14 +139,7 @@ impl ReplyRequest {
             bail!("reply file name is invalid");
         };
         let name = name.to_string();
-        Ok((
-            ReplyPayload::File {
-                path,
-                name,
-            },
-            at,
-            reply_to,
-        ))
+        Ok((ReplyPayload::File { path, name }, at, reply_to))
     }
 }
 
@@ -182,18 +166,12 @@ pub fn build_outbound_message(
     let mut segments = Vec::new();
     if context.is_group {
         let quoted_id = reply_to.unwrap_or(context.source_message_id);
-        segments.push(OutboundSegment::Reply {
-            message_id: quoted_id,
-        });
+        segments.push(OutboundSegment::Reply { message_id: quoted_id });
         if at_targets.is_empty() {
-            segments.push(OutboundSegment::At {
-                user_id: context.source_sender_id,
-            });
+            segments.push(OutboundSegment::At { user_id: context.source_sender_id });
         } else {
             for &user_id in at_targets {
-                segments.push(OutboundSegment::At {
-                    user_id,
-                });
+                segments.push(OutboundSegment::At { user_id });
             }
         }
     }
@@ -202,24 +180,11 @@ pub fn build_outbound_message(
         ReplyPayload::Text(text) => segments.push(OutboundSegment::Text {
             text: if context.is_group { prefix_group_text_with_space(text) } else { text },
         }),
-        ReplyPayload::Image {
-            path,
-        } => segments.push(OutboundSegment::Image {
-            path,
-        }),
-        ReplyPayload::File {
-            path,
-            name,
-        } => segments.push(OutboundSegment::File {
-            path,
-            name,
-        }),
+        ReplyPayload::Image { path } => segments.push(OutboundSegment::Image { path }),
+        ReplyPayload::File { path, name } => segments.push(OutboundSegment::File { path, name }),
     }
 
-    OutboundMessage {
-        target,
-        segments,
-    }
+    OutboundMessage { target, segments }
 }
 
 /// Prepend a single ASCII space to a group-reply body when the text
@@ -427,11 +392,7 @@ mod build_outbound_tests {
     }
 
     fn private_context() -> ActiveReplyContext {
-        ActiveReplyContext {
-            is_group: false,
-            reply_target_id: 123,
-            ..group_context()
-        }
+        ActiveReplyContext { is_group: false, reply_target_id: 123, ..group_context() }
     }
 
     fn reply_segments(message: &crate::outbound::OutboundMessage) -> Vec<i64> {
@@ -439,9 +400,7 @@ mod build_outbound_tests {
             .segments
             .iter()
             .filter_map(|segment| match segment {
-                OutboundSegment::Reply {
-                    message_id,
-                } => Some(*message_id),
+                OutboundSegment::Reply { message_id } => Some(*message_id),
                 _ => None,
             })
             .collect()
@@ -490,9 +449,7 @@ mod build_outbound_tests {
             .segments
             .iter()
             .filter_map(|segment| match segment {
-                OutboundSegment::At {
-                    user_id,
-                } => Some(*user_id),
+                OutboundSegment::At { user_id } => Some(*user_id),
                 _ => None,
             })
             .collect();
@@ -504,9 +461,7 @@ mod build_outbound_tests {
             .segments
             .iter()
             .find_map(|segment| match segment {
-                OutboundSegment::Text {
-                    text,
-                } => Some(text.as_str()),
+                OutboundSegment::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .expect("text segment present")

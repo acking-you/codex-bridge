@@ -75,11 +75,7 @@ impl AnthropicMessages {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|error| anyhow::anyhow!("build reqwest client: {error}"))?;
-        Ok(Self {
-            config,
-            client,
-            tags,
-        })
+        Ok(Self { config, client, tags })
     }
 
     fn endpoint(&self) -> String {
@@ -124,10 +120,7 @@ impl ModelCapability for AnthropicMessages {
             model: &self.config.model,
             max_tokens: input.max_tokens.unwrap_or(self.config.max_tokens),
             system,
-            messages: vec![AnthropicMessage {
-                role: "user",
-                content: prompt,
-            }],
+            messages: vec![AnthropicMessage { role: "user", content: prompt }],
         };
         let response = self
             .client
@@ -154,9 +147,7 @@ impl ModelCapability for AnthropicMessages {
         if text.trim().is_empty() {
             return Err(CapabilityError::Upstream("upstream returned empty text content".into()));
         }
-        Ok(CapabilityOutput::Text {
-            text,
-        })
+        Ok(CapabilityOutput::Text { text })
     }
 }
 
@@ -256,10 +247,7 @@ mod tests {
     #[test]
     fn extract_text_returns_empty_when_no_text_blocks() {
         let parsed = AnthropicResponse {
-            content: vec![AnthropicContentBlock {
-                kind: "tool_use".into(),
-                text: None,
-            }],
+            content: vec![AnthropicContentBlock { kind: "tool_use".into(), text: None }],
         };
         assert_eq!(parsed.extract_text(), "");
     }
@@ -268,11 +256,7 @@ mod tests {
     async fn invoke_rejects_empty_prompt() {
         let cap = AnthropicMessages::from_config(sample_config()).expect("build");
         let err = cap
-            .invoke(&CapabilityInput {
-                prompt: "   ".into(),
-                system: None,
-                max_tokens: None,
-            })
+            .invoke(&CapabilityInput { prompt: "   ".into(), system: None, max_tokens: None })
             .await
             .expect_err("should reject");
         match err {
@@ -287,10 +271,7 @@ mod tests {
             model: "claude-sonnet-4-6",
             max_tokens: 256,
             system: Some("you are Bocchi, be blunt"),
-            messages: vec![AnthropicMessage {
-                role: "user",
-                content: "prompt body",
-            }],
+            messages: vec![AnthropicMessage { role: "user", content: "prompt body" }],
         };
         let payload = serde_json::to_value(&request).expect("serialize");
         assert_eq!(payload["system"], "you are Bocchi, be blunt");
@@ -304,10 +285,7 @@ mod tests {
             model: "claude-sonnet-4-6",
             max_tokens: 256,
             system: None,
-            messages: vec![AnthropicMessage {
-                role: "user",
-                content: "prompt body",
-            }],
+            messages: vec![AnthropicMessage { role: "user", content: "prompt body" }],
         };
         let payload = serde_json::to_value(&request).expect("serialize");
         assert!(payload.get("system").is_none(), "system field leaked when None: {payload}");

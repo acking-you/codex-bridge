@@ -48,10 +48,7 @@ impl IncomingFrame {
     /// Parse a raw websocket payload into an event or response frame.
     pub fn from_value(value: Value) -> Result<Self> {
         if let Some(echo) = value.get("echo").and_then(Value::as_str) {
-            return Ok(Self::Response {
-                echo: echo.to_string(),
-                payload: value,
-            });
+            return Ok(Self::Response { echo: echo.to_string(), payload: value });
         }
 
         let event = NormalizedEvent::try_from(value)?;
@@ -391,21 +388,12 @@ impl NapCatClient {
             }
         });
 
-        Ok((
-            Self {
-                sender: action_tx,
-                pending,
-            },
-            event_rx,
-        ))
+        Ok((Self { sender: action_tx, pending }, event_rx))
     }
 
     async fn get_login_info(&self) -> Result<LoginIdentity> {
         let raw: RawLoginInfo = self.call_action("get_login_info", json!({})).await?;
-        Ok(LoginIdentity {
-            self_id: parse_i64_value(&raw.user_id)?,
-            nickname: raw.nickname,
-        })
+        Ok(LoginIdentity { self_id: parse_i64_value(&raw.user_id)?, nickname: raw.nickname })
     }
 
     async fn get_friend_list(&self) -> Result<Vec<FriendProfile>> {
@@ -443,9 +431,7 @@ impl NapCatClient {
                 }),
             )
             .await?;
-        Ok(SendMessageReceipt {
-            message_id: parse_i64_value(&raw.message_id)?,
-        })
+        Ok(SendMessageReceipt { message_id: parse_i64_value(&raw.message_id)? })
     }
 
     async fn send_group_message(&self, group_id: i64, text: String) -> Result<SendMessageReceipt> {
@@ -458,17 +444,13 @@ impl NapCatClient {
                 }),
             )
             .await?;
-        Ok(SendMessageReceipt {
-            message_id: parse_i64_value(&raw.message_id)?,
-        })
+        Ok(SendMessageReceipt { message_id: parse_i64_value(&raw.message_id)? })
     }
 
     async fn send_outbound_message(&self, message: OutboundMessage) -> Result<SendMessageReceipt> {
         let (action, params) = build_outbound_action(&message);
         let raw: RawSendReceipt = self.call_action(action, params).await?;
-        Ok(SendMessageReceipt {
-            message_id: parse_i64_value(&raw.message_id)?,
-        })
+        Ok(SendMessageReceipt { message_id: parse_i64_value(&raw.message_id)? })
     }
 
     async fn set_message_reaction(&self, message_id: i64, emoji_id: String) -> Result<()> {
@@ -505,12 +487,7 @@ impl NapCatClient {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "unknown".to_string());
         let text = crate::events::extract_text(&raw, self_id);
-        Ok(FetchedMessage {
-            message_id,
-            sender_id,
-            sender_name,
-            text,
-        })
+        Ok(FetchedMessage { message_id, sender_id, sender_name, text })
     }
 
     async fn get_group_history(
@@ -725,42 +702,31 @@ struct RawSendReceipt {
 
 fn build_outbound_segment(segment: &OutboundSegment) -> Value {
     match segment {
-        OutboundSegment::Reply {
-            message_id,
-        } => json!({
+        OutboundSegment::Reply { message_id } => json!({
             "type": "reply",
             "data": {
                 "id": message_id.to_string(),
             },
         }),
-        OutboundSegment::At {
-            user_id,
-        } => json!({
+        OutboundSegment::At { user_id } => json!({
             "type": "at",
             "data": {
                 "qq": user_id.to_string(),
             },
         }),
-        OutboundSegment::Text {
-            text,
-        } => json!({
+        OutboundSegment::Text { text } => json!({
             "type": "text",
             "data": {
                 "text": text,
             },
         }),
-        OutboundSegment::Image {
-            path,
-        } => json!({
+        OutboundSegment::Image { path } => json!({
             "type": "image",
             "data": {
                 "file": path.display().to_string(),
             },
         }),
-        OutboundSegment::File {
-            path,
-            name,
-        } => json!({
+        OutboundSegment::File { path, name } => json!({
             "type": "file",
             "data": {
                 "file": path.display().to_string(),

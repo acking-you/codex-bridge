@@ -188,12 +188,15 @@ fn recent_task_output_keeps_only_latest_entries() {
     let recent = store
         .recent_task_output(&task_id, 4)
         .expect("query recent output");
-    assert_eq!(recent, vec![
-        "line-2".to_string(),
-        "line-3".to_string(),
-        "line-4".to_string(),
-        "line-5".to_string(),
-    ]);
+    assert_eq!(
+        recent,
+        vec![
+            "line-2".to_string(),
+            "line-3".to_string(),
+            "line-4".to_string(),
+            "line-5".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -208,15 +211,18 @@ fn schema_v4_drops_prompt_version_columns_from_runtime_tables() {
     assert_eq!(binding_columns, vec!["conversation_key", "thread_id"]);
 
     let task_columns = table_columns(&conn, "task_runs");
-    assert_eq!(task_columns, vec![
-        "task_id",
-        "conversation_key",
-        "thread_id",
-        "owner_sender_id",
-        "source_message_id",
-        "status",
-        "created_at",
-    ]);
+    assert_eq!(
+        task_columns,
+        vec![
+            "task_id",
+            "conversation_key",
+            "thread_id",
+            "owner_sender_id",
+            "source_message_id",
+            "status",
+            "created_at",
+        ]
+    );
 
     let output_columns = table_columns(&conn, "task_output");
     assert_eq!(output_columns, vec!["row_id", "task_id", "text", "created_at"]);
@@ -285,15 +291,18 @@ fn legacy_v3_store_migrates_without_prompt_version_columns() {
     let binding_columns = table_columns(&conn, "conversation_bindings");
     let task_columns = table_columns(&conn, "task_runs");
     assert_eq!(binding_columns, vec!["conversation_key", "thread_id"]);
-    assert_eq!(task_columns, vec![
-        "task_id",
-        "conversation_key",
-        "thread_id",
-        "owner_sender_id",
-        "source_message_id",
-        "status",
-        "created_at",
-    ]);
+    assert_eq!(
+        task_columns,
+        vec![
+            "task_id",
+            "conversation_key",
+            "thread_id",
+            "owner_sender_id",
+            "source_message_id",
+            "status",
+            "created_at",
+        ]
+    );
 }
 
 #[test]

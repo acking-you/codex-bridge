@@ -115,9 +115,7 @@ struct SendGroupRequest {
 }
 
 async fn health_handler() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-    })
+    Json(HealthResponse { status: "ok" })
 }
 
 async fn session_handler(
@@ -141,10 +139,7 @@ async fn groups_handler(
 async fn status_handler(
     State(state): State<ServiceState>,
 ) -> Result<Json<StatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    Ok(Json(StatusResponse {
-        status: "ok",
-        snapshot: state.runtime_snapshot().await,
-    }))
+    Ok(Json(StatusResponse { status: "ok", snapshot: state.runtime_snapshot().await }))
 }
 
 async fn queue_handler(
@@ -155,10 +150,7 @@ async fn queue_handler(
         "等待中的会话：{}，待处理 turn：{}",
         snapshot.ready_lane_count, snapshot.total_pending_turn_count
     );
-    Ok(Json(TextResponse {
-        status: "ok",
-        text,
-    }))
+    Ok(Json(TextResponse { status: "ok", text }))
 }
 
 async fn send_private_handler(
@@ -174,10 +166,7 @@ async fn send_private_handler(
         .send_private_message(payload.user_id, text)
         .await
         .map_err(internal_error)?;
-    Ok(Json(SendMessageResponse {
-        status: "ok",
-        receipt,
-    }))
+    Ok(Json(SendMessageResponse { status: "ok", receipt }))
 }
 
 async fn send_group_handler(
@@ -193,10 +182,7 @@ async fn send_group_handler(
         .send_group_message(payload.group_id, text)
         .await
         .map_err(internal_error)?;
-    Ok(Json(SendMessageResponse {
-        status: "ok",
-        receipt,
-    }))
+    Ok(Json(SendMessageResponse { status: "ok", receipt }))
 }
 
 async fn events_ws_handler(
@@ -227,10 +213,7 @@ async fn cancel_handler(
         .send_control_command(command)
         .await
         .map_err(internal_error)?;
-    Ok(Json(TextResponse {
-        status: "ok",
-        text: "cancel sent".to_string(),
-    }))
+    Ok(Json(TextResponse { status: "ok", text: "cancel sent".to_string() }))
 }
 
 async fn retry_last_handler(
@@ -242,10 +225,7 @@ async fn retry_last_handler(
         .send_control_command(command)
         .await
         .map_err(internal_error)?;
-    Ok(Json(TextResponse {
-        status: "ok",
-        text: "retry command sent".to_string(),
-    }))
+    Ok(Json(TextResponse { status: "ok", text: "retry command sent".to_string() }))
 }
 
 async fn reply_handler(
@@ -276,10 +256,7 @@ async fn reply_handler(
         .mark_reply_sent(token.as_str())
         .await
         .map_err(internal_error)?;
-    Ok(Json(SendMessageResponse {
-        status: "ok",
-        receipt,
-    }))
+    Ok(Json(SendMessageResponse { status: "ok", receipt }))
 }
 
 async fn history_query_handler(
@@ -290,20 +267,20 @@ async fn history_query_handler(
         return Err(bad_request("token must not be empty"));
     }
     let result = state
-        .query_current_conversation_history(payload.token.as_str(), HistoryQuery {
-            query: payload.query,
-            keyword: payload.keyword,
-            sender_name: payload.sender_name,
-            start_time: payload.start_time,
-            end_time: payload.end_time,
-            limit: payload.limit.unwrap_or(50),
-        })
+        .query_current_conversation_history(
+            payload.token.as_str(),
+            HistoryQuery {
+                query: payload.query,
+                keyword: payload.keyword,
+                sender_name: payload.sender_name,
+                start_time: payload.start_time,
+                end_time: payload.end_time,
+                limit: payload.limit.unwrap_or(50),
+            },
+        )
         .await
         .map_err(internal_error)?;
-    Ok(Json(HistoryQueryResponse {
-        status: "ok",
-        result,
-    }))
+    Ok(Json(HistoryQueryResponse { status: "ok", result }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -352,15 +329,10 @@ async fn capability_invoke_handler(
         "invoking model capability"
     );
     match capability.invoke(&input).await {
-        Ok(CapabilityOutput::Text {
-            text,
-        }) => Ok(Json(CapabilityInvokeResponse::Text {
-            id: capability.id().to_string(),
-            text,
-        })),
-        Ok(CapabilityOutput::Image {
-            path,
-        }) => Ok(Json(CapabilityInvokeResponse::Image {
+        Ok(CapabilityOutput::Text { text }) => {
+            Ok(Json(CapabilityInvokeResponse::Text { id: capability.id().to_string(), text }))
+        },
+        Ok(CapabilityOutput::Image { path }) => Ok(Json(CapabilityInvokeResponse::Image {
             id: capability.id().to_string(),
             path: path.to_string_lossy().into_owned(),
         })),
@@ -370,12 +342,7 @@ async fn capability_invoke_handler(
                 %error,
                 "model capability returned an error"
             );
-            Err((
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: error.to_string(),
-                }),
-            ))
+            Err((StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: error.to_string() })))
         },
     }
 }
@@ -386,10 +353,7 @@ async fn capability_reload_handler(
     match state.reload_capabilities().await {
         Ok(capability_count) => {
             info!(capability_count, "model capabilities reloaded");
-            Ok(Json(CapabilityReloadResponse {
-                status: "ok",
-                capability_count,
-            }))
+            Ok(Json(CapabilityReloadResponse { status: "ok", capability_count }))
         },
         Err(error) => {
             info!(%error, "model capabilities reload failed");
@@ -399,21 +363,11 @@ async fn capability_reload_handler(
 }
 
 fn bad_request(message: &str) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: message.to_string(),
-        }),
-    )
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message.to_string() }))
 }
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorResponse {
-            error: error.to_string(),
-        }),
-    )
+    (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: error.to_string() }))
 }
 
 fn parse_conversation_command_target(conversation_key: &str) -> Option<(bool, i64)> {

@@ -45,15 +45,10 @@ async fn main() -> Result<()> {
         Commands::RetryLast => post_local_json(&config, "/api/tasks/retry-last", json!({}))
             .await
             .map(|_| ()),
-        Commands::Reply {
-            text,
-            image,
-            file,
-        } => reply_command(&config, &project_root()?, text, image, file).await,
-        Commands::SendPrivate {
-            user_id,
-            text,
-        } => post_local_json(
+        Commands::Reply { text, image, file } => {
+            reply_command(&config, &project_root()?, text, image, file).await
+        },
+        Commands::SendPrivate { user_id, text } => post_local_json(
             &config,
             "/api/messages/private",
             json!({
@@ -63,10 +58,7 @@ async fn main() -> Result<()> {
         )
         .await
         .map(|_| ()),
-        Commands::SendGroup {
-            group_id,
-            text,
-        } => post_local_json(
+        Commands::SendGroup { group_id, text } => post_local_json(
             &config,
             "/api/messages/group",
             json!({

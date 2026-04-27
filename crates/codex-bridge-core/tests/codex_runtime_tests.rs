@@ -136,17 +136,20 @@ fn codex_app_server_command_uses_explicit_bin_selection() {
     let config = runtime_config();
     let command = build_codex_app_server_command(&config);
 
-    assert_eq!(command, vec![
-        "cargo".to_string(),
-        "run".to_string(),
-        "--manifest-path".to_string(),
-        "/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs/Cargo.toml".to_string(),
-        "--bin".to_string(),
-        "codex-app-server".to_string(),
-        "--".to_string(),
-        "--listen".to_string(),
-        "stdio://".to_string(),
-    ]);
+    assert_eq!(
+        command,
+        vec![
+            "cargo".to_string(),
+            "run".to_string(),
+            "--manifest-path".to_string(),
+            "/home/ts_user/llm_pro/codex-bridge/deps/codex/codex-rs/Cargo.toml".to_string(),
+            "--bin".to_string(),
+            "codex-app-server".to_string(),
+            "--".to_string(),
+            "--listen".to_string(),
+            "stdio://".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -274,14 +277,20 @@ fn turn_start_params_use_workspace_write_and_granular_approvals() {
         })
     );
     assert_eq!(params.input.len(), 3);
-    assert_eq!(params.input[1], UserInput::Skill {
-        name: "reply-current".to_string(),
-        path: workspace_root.join("skills/reply-current/SKILL.md"),
-    });
-    assert_eq!(params.input[2], UserInput::Skill {
-        name: "staticflow-kiro-log-diagnoser".to_string(),
-        path: workspace_root.join("skills/staticflow-kiro-log-diagnoser/SKILL.md"),
-    });
+    assert_eq!(
+        params.input[1],
+        UserInput::Skill {
+            name: "reply-current".to_string(),
+            path: workspace_root.join("skills/reply-current/SKILL.md"),
+        }
+    );
+    assert_eq!(
+        params.input[2],
+        UserInput::Skill {
+            name: "staticflow-kiro-log-diagnoser".to_string(),
+            path: workspace_root.join("skills/staticflow-kiro-log-diagnoser/SKILL.md"),
+        }
+    );
 }
 
 #[test]

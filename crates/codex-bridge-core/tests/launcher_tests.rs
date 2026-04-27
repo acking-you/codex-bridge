@@ -12,12 +12,15 @@ use tempfile::TempDir;
 #[test]
 fn launch_command_uses_xvfb_run() {
     let command = build_launch_command(PathBuf::from("/tmp/QQ/qq").as_path());
-    assert_eq!(command, vec![
-        "xvfb-run".to_string(),
-        "-a".to_string(),
-        "/tmp/QQ/qq".to_string(),
-        "--no-sandbox".to_string(),
-    ]);
+    assert_eq!(
+        command,
+        vec![
+            "xvfb-run".to_string(),
+            "-a".to_string(),
+            "/tmp/QQ/qq".to_string(),
+            "--no-sandbox".to_string(),
+        ]
+    );
 }
 
 #[test]

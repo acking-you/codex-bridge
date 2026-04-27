@@ -20,9 +20,7 @@ impl WorkspaceFixture {
         fs::create_dir_all(root.join(".run/artifacts")).unwrap();
         fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
         fs::write(root.join(".run/artifacts/existing.txt"), "artifact\n").unwrap();
-        Self {
-            tempdir,
-        }
+        Self { tempdir }
     }
 
     fn repo_root(&self) -> &Path {

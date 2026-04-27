@@ -56,10 +56,7 @@ impl ReplyRegistry {
     /// Create a registry backed by the per-conversation directory. Paths are
     /// created on demand when contexts are activated.
     pub fn new(contexts_dir: PathBuf) -> Self {
-        Self {
-            contexts_dir,
-            active: HashMap::new(),
-        }
+        Self { contexts_dir, active: HashMap::new() }
     }
 
     /// Activate a new reply context by writing the lane-scoped
@@ -71,11 +68,10 @@ impl ReplyRegistry {
         write_context_to_file(&per_conversation_file, &context).with_context(|| {
             format!("write per-conversation reply context {}", per_conversation_file.display())
         })?;
-        self.active.insert(token.clone(), ActiveReplyState {
-            context,
-            send_count: 0,
-            per_conversation_file,
-        });
+        self.active.insert(
+            token.clone(),
+            ActiveReplyState { context, send_count: 0, per_conversation_file },
+        );
         Ok(())
     }
 

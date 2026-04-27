@@ -69,11 +69,10 @@ impl RuntimePoolState {
             .ok_or_else(|| anyhow!("no idle runtime slot available"))?;
         slot.state = RuntimeSlotState::Busy;
         slot.assigned_conversation_key = Some(conversation_key.to_string());
-        self.lane_leases
-            .insert(conversation_key.to_string(), LaneLease {
-                slot_id: slot.slot_id,
-                thread_id: None,
-            });
+        self.lane_leases.insert(
+            conversation_key.to_string(),
+            LaneLease { slot_id: slot.slot_id, thread_id: None },
+        );
         Ok(slot.slot_id)
     }
 
@@ -172,14 +171,9 @@ impl RuntimePool {
     pub fn from_executors(executors: Vec<Arc<dyn CodexExecutor>>) -> Self {
         let slots = executors
             .into_iter()
-            .map(|executor| RuntimeSlotHandle {
-                executor,
-            })
+            .map(|executor| RuntimeSlotHandle { executor })
             .collect::<Vec<_>>();
-        Self {
-            state: Mutex::new(RuntimePoolState::new(slots.len())),
-            slots,
-        }
+        Self { state: Mutex::new(RuntimePoolState::new(slots.len())), slots }
     }
 
     /// Spawn `size` concrete Codex runtimes that share the same `CODEX_HOME`
@@ -415,11 +409,14 @@ mod tests {
         let active_turn = pool.start_turn(&thread_id, "hi").await.expect("start turn");
         let _ = pool.wait_for_turn(&active_turn).await.expect("wait turn");
 
-        assert_eq!(slot0.calls(), vec![
-            "ensure:group:1".to_string(),
-            "start:thread-a".to_string(),
-            "wait:thread-a".to_string(),
-        ]);
+        assert_eq!(
+            slot0.calls(),
+            vec![
+                "ensure:group:1".to_string(),
+                "start:thread-a".to_string(),
+                "wait:thread-a".to_string(),
+            ]
+        );
         assert!(slot1.calls().is_empty());
         assert_eq!(pool.runtime_slots().await.len(), 2);
         assert!(pool
