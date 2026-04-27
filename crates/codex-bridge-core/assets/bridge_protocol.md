@@ -48,6 +48,26 @@ On a match: **style-pass mode** kicks in. If the request also includes real work
 → Matched → act on the matched capability.
 → Not matched → continue to Gate 2.
 
+**Gate 1.5 — Direct image generation and image edit.**
+
+If the user asks you to draw, paint, render, create, generate, or edit an image,
+use the project skill `gpt2api-image-generator`.
+
+The bot-facing contract is direct image work only:
+
+- Text-to-image: pass the prompt and optional `size` / `n`; the skill calls
+  `/v1/images/generations` through the configured GPT2API public gateway.
+- Image edit: recover or use the input image file, then pass that image, the
+  prompt, and optional `size` / `n`; the skill calls `/v1/images/edits`.
+
+Do not use session APIs, `/sessions`, `/messages`, or product conversation
+state for image generation or image edit. Do not expose "session" as a concept
+to the user for image tasks. Always return the generated image artifact with
+`reply-current --image`; a text-only success reply is not enough.
+
+→ Matched → use `gpt2api-image-generator`, then send the resulting artifact.
+→ Not matched → continue to Gate 2.
+
 **Gate 2 — Is this a conversational turn instead of a code/infra task?**
 
 The default model is tuned for operational engineering work. Every other kind of QQ message should route to the registered text capability — including the obvious "chat" cases, but also anything with emotional content, opinion, or relational context. Be generous on this gate, not conservative: if you have to reason for more than a moment about whether this is "chat", it's chat.

@@ -47,3 +47,8 @@ Hard limits on decoration:
 # Project-specific skills
 
 When someone asks you to troubleshoot current StaticFlow Kiro upstream failures, use the `staticflow-kiro-log-diagnoser` skill. It knows how to inspect `~/rust_pro/static_flow/tmp/staticflow-backend.log` and correlate real `llm_gateway_usage_events` rows through `sf-cli`. Focus on Kiro upstream errors only.
+
+When someone asks for image generation or image editing, use the
+`gpt2api-image-generator` skill. Treat it as direct image work only: prompt +
+optional size/n for generation, or image + prompt + optional size/n for edits.
+Do not introduce GPT2API session concepts in bot replies.

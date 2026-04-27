@@ -441,6 +441,16 @@ struct RuntimeProgressSink {
     state: ServiceState,
     state_store: Arc<Mutex<StateStore>>,
     task_id: String,
+    reply_token: String,
+    is_group: bool,
+    reply_target_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeProgressTarget {
+    reply_token: String,
+    is_group: bool,
+    reply_target_id: i64,
 }
 
 #[async_trait]
@@ -463,6 +473,25 @@ impl TurnProgressSink for RuntimeProgressSink {
         let store = self.state_store.lock().await;
         store.append_task_output(&self.task_id, &text, 4)
     }
+
+    async fn commit_agent_message(&self, text: String) -> Result<()> {
+        let sink = ServiceReplySink {
+            state: self.state.clone(),
+        };
+        match send_reply(&sink, self.is_group, self.reply_target_id, text).await {
+            Ok(()) => {
+                self.state.mark_reply_sent(&self.reply_token).await?;
+            },
+            Err(error) => {
+                warn!(
+                    task_id = %self.task_id,
+                    error = %error,
+                    "agent text output reply failed, continuing"
+                );
+            },
+        }
+        Ok(())
+    }
 }
 
 async fn execute_task_for_runtime(
@@ -471,11 +500,15 @@ async fn execute_task_for_runtime(
     state_store: Arc<Mutex<StateStore>>,
     task_id: String,
     active_turn: ActiveTurn,
+    progress_target: RuntimeProgressTarget,
 ) -> Result<TaskExecutionOutcome> {
     let progress = RuntimeProgressSink {
         state,
         state_store: state_store.clone(),
         task_id: task_id.clone(),
+        reply_token: progress_target.reply_token,
+        is_group: progress_target.is_group,
+        reply_target_id: progress_target.reply_target_id,
     };
     let result = match codex
         .wait_for_turn_with_progress(&active_turn, Some(&progress))
@@ -598,6 +631,11 @@ async fn start_runtime_task(
         state_store,
         persisted_task_id,
         active_turn.clone(),
+        RuntimeProgressTarget {
+            reply_token: reply_token.clone(),
+            is_group: task.is_group,
+            reply_target_id: task.reply_target_id,
+        },
     ));
     Ok((
         ActiveRuntimeTask {
@@ -676,6 +714,10 @@ async fn enqueue_runtime_task(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "orchestrator loop passes several independent mutable queues explicitly"
+)]
 async fn dispatch_ready_tasks(
     task_joins: &mut FuturesUnordered<TaggedJoin>,
     active_tasks: &mut HashMap<String, ActiveRuntimeTask>,
@@ -711,7 +753,8 @@ async fn dispatch_ready_tasks(
             .unwrap_or_else(|| scheduled.task.source_message_id.to_string());
         if promoted.task_id != expected_task_id {
             return Err(anyhow!(
-                "queued task mismatch for {conversation_key}: scheduler={} payload={expected_task_id}",
+                "queued task mismatch for {conversation_key}: scheduler={} \
+                 payload={expected_task_id}",
                 promoted.task_id
             ));
         }
@@ -736,6 +779,10 @@ async fn dispatch_ready_tasks(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "orchestrator loop passes several independent mutable queues explicitly"
+)]
 async fn start_or_enqueue_runtime_task(
     scheduled: ScheduledRuntimeTask,
     task_joins: &mut FuturesUnordered<TaggedJoin>,
@@ -847,16 +894,17 @@ fn enrich_task_with_admin_marker(mut task: TaskRequest, admin_user_id: i64) -> T
 ///
 /// On fetch failure the block degrades to `[quote<msg:12345>]` so the
 /// agent still knows a quote exists and can use the id with `--reply-to`.
-async fn enrich_task_with_quoted_context(mut task: TaskRequest, state: &ServiceState) -> TaskRequest {
+async fn enrich_task_with_quoted_context(
+    mut task: TaskRequest,
+    state: &ServiceState,
+) -> TaskRequest {
     let Some(quoted_id) = task.quoted_message_id else {
         return task;
     };
 
-    let fetched = tokio::time::timeout(
-        QUOTED_FETCH_TIMEOUT,
-        state.fetch_message(quoted_id, task.self_id),
-    )
-    .await;
+    let fetched =
+        tokio::time::timeout(QUOTED_FETCH_TIMEOUT, state.fetch_message(quoted_id, task.self_id))
+            .await;
 
     let preamble = match fetched {
         Ok(Ok(message)) => {
@@ -987,16 +1035,10 @@ async fn register_pending_approval(
         )
         .await?;
     replies
-        .send_private(
-            admin_user_id,
-            reply_formatter::format_admin_deny_command(&pending.task_id),
-        )
+        .send_private(admin_user_id, reply_formatter::format_admin_deny_command(&pending.task_id))
         .await?;
     replies
-        .send_private(
-            admin_user_id,
-            reply_formatter::format_admin_status_command(&pending.task_id),
-        )
+        .send_private(admin_user_id, reply_formatter::format_admin_status_command(&pending.task_id))
         .await
 }
 
@@ -1021,6 +1063,10 @@ async fn approve_pending_task(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "approval handling coordinates independent scheduler, queue, and store state"
+)]
 async fn handle_group_reaction_approval(
     reaction: crate::events::GroupMessageReactionEvent,
     replies: &dyn ReplySink,
@@ -1044,15 +1090,8 @@ async fn handle_group_reaction_approval(
         return Ok(None);
     };
 
-    approve_pending_task(
-        pending,
-        replies,
-        scheduler,
-        pending_tasks,
-        state_store,
-        active_tasks,
-    )
-    .await
+    approve_pending_task(pending, replies, scheduler, pending_tasks, state_store, active_tasks)
+        .await
 }
 
 /// Result of attempting to compact a conversation thread.
@@ -1186,13 +1225,12 @@ async fn handle_runtime_command(
                     reply_formatter::format_admin_approval_notice(pending)
                 } else {
                     let store = state_store.lock().await;
-                    let recent_output = if running_snapshot.running_task_id.as_deref()
-                        == Some(task_id.as_str())
-                    {
-                        running_snapshot.recent_output.clone()
-                    } else {
-                        store.recent_task_output(&task_id, 4)?
-                    };
+                    let recent_output =
+                        if running_snapshot.running_task_id.as_deref() == Some(task_id.as_str()) {
+                            running_snapshot.recent_output.clone()
+                        } else {
+                            store.recent_task_output(&task_id, 4)?
+                        };
                     store
                         .task_by_id(&task_id)?
                         .map(|task| reply_formatter::format_task_status(&task, &recent_output))
@@ -1316,7 +1354,9 @@ async fn handle_runtime_command(
                 .await?;
                 return Ok(None);
             }
-            let pending = pending_approvals.take(&task_id).expect("pending task still present");
+            let pending = pending_approvals
+                .take(&task_id)
+                .expect("pending task still present");
             if let Some(task) = approve_pending_task(
                 pending,
                 replies,
@@ -1325,7 +1365,8 @@ async fn handle_runtime_command(
                 state_store,
                 active_tasks,
             )
-            .await? {
+            .await?
+            {
                 send_reply(
                     replies,
                     command.is_group,
@@ -1426,9 +1467,13 @@ async fn handle_runtime_command(
                 .await?;
                 return Ok(None);
             }
-            let outcome =
-                compact_with_recovery(codex.as_ref(), state_store, &command.conversation_key, &binding)
-                    .await;
+            let outcome = compact_with_recovery(
+                codex.as_ref(),
+                state_store,
+                &command.conversation_key,
+                &binding,
+            )
+            .await;
             let reply_text = match outcome {
                 Ok(CompactOutcome::Started) => reply_formatter::format_compact_started(),
                 Ok(CompactOutcome::NothingToCompact) => reply_formatter::format_compact_missing(),
@@ -1441,13 +1486,7 @@ async fn handle_runtime_command(
                     reply_formatter::format_compact_failed()
                 },
             };
-            send_reply(
-                replies,
-                command.is_group,
-                command.reply_target_id,
-                reply_text,
-            )
-            .await?;
+            send_reply(replies, command.is_group, command.reply_target_id, reply_text).await?;
             Ok(None)
         },
     }
@@ -1863,21 +1902,25 @@ async fn refresh_snapshot(
             }
         })
         .collect::<Vec<_>>();
-    lanes.extend(queued_counts.into_iter().filter_map(|(conversation_key, pending_turn_count)| {
-        if scheduler.running_for(&conversation_key).is_some() {
-            return None;
-        }
-        Some(crate::lane_manager::LaneSnapshot {
-            conversation_key,
-            thread_id: None,
-            state: crate::lane_manager::LaneRuntimeState::Queued,
-            pending_turn_count,
-            active_task_id: None,
-            active_since: None,
-            last_progress_at: None,
-            last_terminal_summary: None,
-        })
-    }));
+    lanes.extend(
+        queued_counts
+            .into_iter()
+            .filter_map(|(conversation_key, pending_turn_count)| {
+                if scheduler.running_for(&conversation_key).is_some() {
+                    return None;
+                }
+                Some(crate::lane_manager::LaneSnapshot {
+                    conversation_key,
+                    thread_id: None,
+                    state: crate::lane_manager::LaneRuntimeState::Queued,
+                    pending_turn_count,
+                    active_task_id: None,
+                    active_since: None,
+                    last_progress_at: None,
+                    last_terminal_summary: None,
+                })
+            }),
+    );
     lanes.sort_by(|left, right| left.conversation_key.cmp(&right.conversation_key));
     let snapshot = crate::service::TaskSnapshot {
         running_task_id,
@@ -1966,11 +2009,7 @@ pub async fn send_reply_best_effort(
     text: String,
 ) {
     if let Err(error) = send_reply(sink, is_group, target_id, text).await {
-        error!(
-            is_group,
-            target_id,
-            "reply send failed, continuing: {error:#}"
-        );
+        error!(is_group, target_id, "reply send failed, continuing: {error:#}");
     }
 }
 

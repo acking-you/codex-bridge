@@ -32,8 +32,8 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    lane_manager::RuntimeSlotSnapshot,
     approval_guard::{ApprovalDecision, ApprovalGuard},
+    lane_manager::RuntimeSlotSnapshot,
     system_prompt::load_persona,
 };
 
@@ -196,6 +196,11 @@ pub trait TurnProgressSink: Send + Sync {
 
     /// Persist one completed output entry for later task-status queries.
     async fn commit_output(&self, text: String) -> Result<()>;
+
+    /// Deliver one completed assistant/agent text message for the active task.
+    async fn commit_agent_message(&self, _text: String) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Minimal interface for codex execution runtimes.
@@ -261,6 +266,12 @@ struct LiveOutputEntry {
     order: u64,
 }
 
+#[derive(Debug, Clone)]
+struct CommittedLiveOutput {
+    rendered: String,
+    agent_message: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct RecentOutputTracker {
     active: HashMap<String, LiveOutputEntry>,
@@ -270,17 +281,25 @@ struct RecentOutputTracker {
 }
 
 impl RecentOutputTracker {
-    fn push_delta(&mut self, item_id: &str, kind: LiveOutputKind, delta: &str) -> Option<Vec<String>> {
+    fn push_delta(
+        &mut self,
+        item_id: &str,
+        kind: LiveOutputKind,
+        delta: &str,
+    ) -> Option<Vec<String>> {
         if delta.is_empty() {
             return None;
         }
 
         let order = self.bump_order();
-        let entry = self.active.entry(item_id.to_string()).or_insert_with(|| LiveOutputEntry {
-            kind,
-            text: String::new(),
-            order,
-        });
+        let entry = self
+            .active
+            .entry(item_id.to_string())
+            .or_insert_with(|| LiveOutputEntry {
+                kind,
+                text: String::new(),
+                order,
+            });
         if entry.kind != kind {
             entry.kind = kind;
             entry.text.clear();
@@ -290,7 +309,10 @@ impl RecentOutputTracker {
         self.recent_output_if_changed()
     }
 
-    fn commit_item(&mut self, item: &ThreadItem) -> (Option<Vec<String>>, Option<String>) {
+    fn commit_item(
+        &mut self,
+        item: &ThreadItem,
+    ) -> (Option<Vec<String>>, Option<CommittedLiveOutput>) {
         let (item_id, kind, explicit_text) = match item {
             ThreadItem::AgentMessage {
                 id,
@@ -312,7 +334,10 @@ impl RecentOutputTracker {
 
         let active = self.active.remove(item_id);
         let text = explicit_text.or_else(|| active.as_ref().map(|entry| entry.text.clone()));
-        let Some(text) = text.and_then(|text| normalize_output_text(&text)) else {
+        let Some(raw_text) = text else {
+            return (self.recent_output_if_changed(), None);
+        };
+        let Some(recent_text) = normalize_output_text(&raw_text) else {
             return (self.recent_output_if_changed(), None);
         };
 
@@ -320,14 +345,25 @@ impl RecentOutputTracker {
         let order = self.bump_order();
         self.committed.push_back(LiveOutputEntry {
             kind,
-            text: text.clone(),
+            text: recent_text.clone(),
             order,
         });
         while self.committed.len() > RECENT_OUTPUT_LIMIT {
             let _ = self.committed.pop_front();
         }
 
-        (self.recent_output_if_changed(), Some(render_output_entry(kind, &text)))
+        let agent_message = if kind == LiveOutputKind::AgentMessage {
+            normalize_agent_reply_text(&raw_text)
+        } else {
+            None
+        };
+        (
+            self.recent_output_if_changed(),
+            Some(CommittedLiveOutput {
+                rendered: render_output_entry(kind, &recent_text),
+                agent_message,
+            }),
+        )
     }
 
     fn recent_output_if_changed(&mut self) -> Option<Vec<String>> {
@@ -387,11 +423,8 @@ impl CodexRuntime {
 
         let (server_request_tx, server_request_rx) = mpsc::unbounded_channel();
         let reader_task = tokio::spawn(reader_loop(stdout, demuxer.clone(), server_request_tx));
-        let approval_task = tokio::spawn(approval_loop(
-            server_request_rx,
-            guard.clone(),
-            write_state.clone(),
-        ));
+        let approval_task =
+            tokio::spawn(approval_loop(server_request_rx, guard.clone(), write_state.clone()));
 
         let runtime = Self {
             _child: ChildGuard::new(child),
@@ -491,9 +524,7 @@ impl CodexRuntime {
             },
             Err(_) => {
                 warn!(method, "codex runtime shut down before response arrived");
-                Err(anyhow!(
-                    "{method} failed: codex runtime shut down before response arrived"
-                ))
+                Err(anyhow!("{method} failed: codex runtime shut down before response arrived"))
             },
         }
     }
@@ -510,7 +541,8 @@ impl CodexRuntime {
         loop {
             let Some(notification) = notifications.recv().await else {
                 return Err(anyhow!(
-                    "codex notification channel for thread {thread_id} closed before turn {turn_id} completed"
+                    "codex notification channel for thread {thread_id} closed before turn \
+                     {turn_id} completed"
                 ));
             };
             log_server_notification(&notification);
@@ -562,18 +594,19 @@ impl CodexRuntime {
                 },
                 ServerNotification::ItemCompleted(payload) => {
                     if let (Some(progress), Some(tracker)) = (progress, tracker.as_mut()) {
-                        let (recent_output, committed_output) =
-                            tracker.commit_item(&payload.item);
+                        let (recent_output, committed_output) = tracker.commit_item(&payload.item);
                         if let Some(recent_output) = recent_output {
                             progress.update_recent_output(recent_output).await?;
                         }
                         if let Some(committed_output) = committed_output {
-                            progress.commit_output(committed_output).await?;
+                            progress.commit_output(committed_output.rendered).await?;
+                            if let Some(agent_message) = committed_output.agent_message {
+                                progress.commit_agent_message(agent_message).await?;
+                            }
                         }
                     }
                     items.push(
-                        serde_json::to_value(payload.item)
-                            .context("serialize completed item")?,
+                        serde_json::to_value(payload.item).context("serialize completed item")?,
                     );
                 },
                 ServerNotification::TurnCompleted(payload)
@@ -662,12 +695,7 @@ async fn reader_loop(
                         continue;
                     },
                 };
-                let sender = demuxer
-                    .thread_senders
-                    .lock()
-                    .await
-                    .get(&thread_id)
-                    .cloned();
+                let sender = demuxer.thread_senders.lock().await.get(&thread_id).cloned();
                 match sender {
                     Some(tx) => {
                         if let Err(error) = tx.send(notification).await {
@@ -776,13 +804,9 @@ fn notification_thread_id(notification: &ServerNotification) -> Option<String> {
         ServerNotification::RawResponseItemCompleted(payload) => Some(payload.thread_id.clone()),
         ServerNotification::AgentMessageDelta(payload) => Some(payload.thread_id.clone()),
         ServerNotification::PlanDelta(payload) => Some(payload.thread_id.clone()),
-        ServerNotification::CommandExecutionOutputDelta(payload) => {
-            Some(payload.thread_id.clone())
-        },
+        ServerNotification::CommandExecutionOutputDelta(payload) => Some(payload.thread_id.clone()),
         ServerNotification::FileChangeOutputDelta(payload) => Some(payload.thread_id.clone()),
-        ServerNotification::ReasoningSummaryTextDelta(payload) => {
-            Some(payload.thread_id.clone())
-        },
+        ServerNotification::ReasoningSummaryTextDelta(payload) => Some(payload.thread_id.clone()),
         ServerNotification::ReasoningTextDelta(payload) => Some(payload.thread_id.clone()),
         ServerNotification::TurnPlanUpdated(payload) => Some(payload.thread_id.clone()),
         ServerNotification::HookCompleted(payload) => Some(payload.thread_id.clone()),
@@ -871,17 +895,15 @@ impl CodexExecutor for CodexRuntime {
             params: build_turn_start_params(&self.config, thread_id, input_text)?,
         };
         info!(thread_id, "starting codex turn");
-        let response: TurnStartResponse = match self
-            .send_request(request, request_id, "turn/start")
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                // turn/start failed; tear down the pre-registered channel.
-                self.drop_thread_channel(thread_id).await;
-                return Err(error);
-            },
-        };
+        let response: TurnStartResponse =
+            match self.send_request(request, request_id, "turn/start").await {
+                Ok(response) => response,
+                Err(error) => {
+                    // turn/start failed; tear down the pre-registered channel.
+                    self.drop_thread_channel(thread_id).await;
+                    return Err(error);
+                },
+            };
         info!(thread_id, turn_id = %response.turn.id, "codex turn started");
 
         Ok(ActiveTurn {
@@ -907,10 +929,7 @@ impl CodexExecutor for CodexRuntime {
         let notifications = {
             let mut receivers = self.demuxer.thread_receivers.lock().await;
             receivers.remove(&active_turn.thread_id).ok_or_else(|| {
-                anyhow!(
-                    "no notification channel registered for thread {}",
-                    active_turn.thread_id
-                )
+                anyhow!("no notification channel registered for thread {}", active_turn.thread_id)
             })?
         };
         let completion = self
@@ -1142,11 +1161,24 @@ fn normalize_output_text(text: &str) -> Option<String> {
         return None;
     }
 
-    let truncated = trimmed.chars().take(RECENT_OUTPUT_MAX_CHARS).collect::<String>();
+    let truncated = trimmed
+        .chars()
+        .take(RECENT_OUTPUT_MAX_CHARS)
+        .collect::<String>();
     if trimmed.chars().count() > RECENT_OUTPUT_MAX_CHARS {
         Some(format!("{truncated}..."))
     } else {
         Some(truncated)
+    }
+}
+
+fn normalize_agent_reply_text(text: &str) -> Option<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1279,21 +1311,20 @@ pub fn build_thread_compact_start_params(thread_id: &str) -> ThreadCompactStartP
 /// Assemble the five-layer developer instructions handed to Codex at
 /// every `thread/start` / `thread/resume`:
 ///
-/// 1. **Persona** — operator-editable identity / voice / project skills
-///    loaded from [`CodexRuntimeConfig::prompt_file`] (which points at
-///    `persona.md` since the layered refactor).
-/// 2. **Bridge protocol** — static, embedded-in-binary text covering
-///    the turn-start checklist, mention / quote / reply-to / permissions
-///    rules.
-/// 3. **Admin context** — a tiny runtime-rendered block that embeds the
-///    admin's QQ id so Codex can recognise 主人 even when the inbound
-///    `[主人]` marker is absent.
+/// 1. **Persona** — operator-editable identity / voice / project skills loaded
+///    from [`CodexRuntimeConfig::prompt_file`] (which points at `persona.md`
+///    since the layered refactor).
+/// 2. **Bridge protocol** — static, embedded-in-binary text covering the
+///    turn-start checklist, mention / quote / reply-to / permissions rules.
+/// 3. **Admin context** — a tiny runtime-rendered block that embeds the admin's
+///    QQ id so Codex can recognise 主人 even when the inbound `[主人]` marker
+///    is absent.
 /// 4. **Model capabilities** — the hot-reloadable "Available model
 ///    capabilities" section rendered from the
 ///    [`crate::model_capabilities::ModelRegistry`], when non-empty.
-/// 5. **Reply context** — the per-thread absolute path to the reply
-///    context file for THIS conversation. Prevents cross-conversation
-///    reply delivery when multiple tasks are active concurrently.
+/// 5. **Reply context** — the per-thread absolute path to the reply context
+///    file for THIS conversation. Prevents cross-conversation reply delivery
+///    when multiple tasks are active concurrently.
 fn build_developer_instructions(
     config: &CodexRuntimeConfig,
     conversation_key: &str,
@@ -1310,11 +1341,8 @@ fn build_developer_instructions(
         },
     };
 
-    let mut layers: Vec<String> = vec![
-        persona.trim().to_string(),
-        bridge.trim().to_string(),
-        admin.trim().to_string(),
-    ];
+    let mut layers: Vec<String> =
+        vec![persona.trim().to_string(), bridge.trim().to_string(), admin.trim().to_string()];
     if let Some(block) = capabilities_block {
         let trimmed = block.trim();
         if !trimmed.is_empty() {
@@ -1423,9 +1451,17 @@ pub fn build_turn_interrupt_params(thread_id: &str, turn_id: &str) -> TurnInterr
     }
 }
 
-/// Extract the last agent/assistant text message from completed turn items.
+/// Extract all agent/assistant text messages from completed turn items.
 pub fn extract_final_reply(items: &[Value]) -> Option<String> {
-    items.iter().rev().find_map(extract_message_text)
+    let replies = items
+        .iter()
+        .filter_map(extract_message_text)
+        .collect::<Vec<_>>();
+    if replies.is_empty() {
+        None
+    } else {
+        Some(replies.join("\n\n"))
+    }
 }
 
 /// Summarize a terminal turn into the QQ-facing reply text.

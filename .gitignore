@@ -1,5 +1,6 @@
 /target
 /.run
+.bridge-private/
 .worktrees/
 __pycache__/
 *.pyc

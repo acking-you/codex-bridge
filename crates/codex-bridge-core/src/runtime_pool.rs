@@ -1,11 +1,6 @@
 //! Runtime-pool executor for lane-based Codex execution.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -74,13 +69,11 @@ impl RuntimePoolState {
             .ok_or_else(|| anyhow!("no idle runtime slot available"))?;
         slot.state = RuntimeSlotState::Busy;
         slot.assigned_conversation_key = Some(conversation_key.to_string());
-        self.lane_leases.insert(
-            conversation_key.to_string(),
-            LaneLease {
+        self.lane_leases
+            .insert(conversation_key.to_string(), LaneLease {
                 slot_id: slot.slot_id,
                 thread_id: None,
-            },
-        );
+            });
         Ok(slot.slot_id)
     }
 
@@ -100,7 +93,8 @@ impl RuntimePoolState {
         if let Some(previous_thread_id) = lease.thread_id.replace(thread_id.to_string()) {
             self.thread_slots.remove(&previous_thread_id);
         }
-        self.thread_slots.insert(thread_id.to_string(), lease.slot_id);
+        self.thread_slots
+            .insert(thread_id.to_string(), lease.slot_id);
         Ok(())
     }
 
@@ -121,13 +115,16 @@ impl RuntimePoolState {
         let Some(slot_id) = self.thread_slots.remove(thread_id) else {
             return;
         };
-        let conversation_key = self.lane_leases.iter().find_map(|(conversation_key, lease)| {
-            if lease.slot_id == slot_id && lease.thread_id.as_deref() == Some(thread_id) {
-                Some(conversation_key.clone())
-            } else {
-                None
-            }
-        });
+        let conversation_key = self
+            .lane_leases
+            .iter()
+            .find_map(|(conversation_key, lease)| {
+                if lease.slot_id == slot_id && lease.thread_id.as_deref() == Some(thread_id) {
+                    Some(conversation_key.clone())
+                } else {
+                    None
+                }
+            });
         if let Some(conversation_key) = conversation_key {
             self.release_lane(&conversation_key);
         }
@@ -175,8 +172,9 @@ impl RuntimePool {
     pub fn from_executors(executors: Vec<Arc<dyn CodexExecutor>>) -> Self {
         let slots = executors
             .into_iter()
-            .enumerate()
-            .map(|(_, executor)| RuntimeSlotHandle { executor })
+            .map(|executor| RuntimeSlotHandle {
+                executor,
+            })
             .collect::<Vec<_>>();
         Self {
             state: Mutex::new(RuntimePoolState::new(slots.len())),
@@ -315,8 +313,9 @@ impl CodexExecutor for RuntimePool {
 mod tests {
     use std::{collections::VecDeque, sync::Mutex as StdMutex};
 
-    use super::*;
     use anyhow::Result;
+
+    use super::*;
 
     #[derive(Debug)]
     struct FakeSlotExecutor {
@@ -416,22 +415,18 @@ mod tests {
         let active_turn = pool.start_turn(&thread_id, "hi").await.expect("start turn");
         let _ = pool.wait_for_turn(&active_turn).await.expect("wait turn");
 
-        assert_eq!(
-            slot0.calls(),
-            vec![
-                "ensure:group:1".to_string(),
-                "start:thread-a".to_string(),
-                "wait:thread-a".to_string(),
-            ]
-        );
+        assert_eq!(slot0.calls(), vec![
+            "ensure:group:1".to_string(),
+            "start:thread-a".to_string(),
+            "wait:thread-a".to_string(),
+        ]);
         assert!(slot1.calls().is_empty());
         assert_eq!(pool.runtime_slots().await.len(), 2);
-        assert!(
-            pool.runtime_slots()
-                .await
-                .iter()
-                .all(|slot| slot.state == RuntimeSlotState::Idle)
-        );
+        assert!(pool
+            .runtime_slots()
+            .await
+            .iter()
+            .all(|slot| slot.state == RuntimeSlotState::Idle));
     }
 
     #[tokio::test]

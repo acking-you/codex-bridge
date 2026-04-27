@@ -40,6 +40,7 @@ struct FakeCodexExecutor {
     status: TurnStatus,
     wait_for_interrupt: bool,
     fail_interrupt: bool,
+    agent_messages: Vec<String>,
 }
 
 impl FakeCodexExecutor {
@@ -70,6 +71,7 @@ impl FakeCodexExecutor {
             status,
             wait_for_interrupt: false,
             fail_interrupt: false,
+            agent_messages: Vec::new(),
         }
     }
 
@@ -91,10 +93,15 @@ impl FakeCodexExecutor {
             status: TurnStatus::Interrupted,
             wait_for_interrupt: true,
             fail_interrupt: false,
+            agent_messages: Vec::new(),
         }
     }
 
-    fn blocking_with_progress(thread_ids: Vec<&str>, turn_id: &str, progress_updates: Vec<&str>) -> Self {
+    fn blocking_with_progress(
+        thread_ids: Vec<&str>,
+        turn_id: &str,
+        progress_updates: Vec<&str>,
+    ) -> Self {
         Self {
             thread_ids: AsyncMutex::new(
                 thread_ids
@@ -112,7 +119,18 @@ impl FakeCodexExecutor {
             status: TurnStatus::Interrupted,
             wait_for_interrupt: true,
             fail_interrupt: false,
+            agent_messages: Vec::new(),
         }
+    }
+
+    fn with_agent_messages(
+        thread_ids: Vec<&str>,
+        turn_id: &str,
+        agent_messages: Vec<&str>,
+    ) -> Self {
+        let mut fake = Self::with_reply(thread_ids, turn_id, "");
+        fake.agent_messages = agent_messages.into_iter().map(str::to_string).collect();
+        fake
     }
 
     fn with_failing_interrupt(mut self) -> Self {
@@ -181,10 +199,11 @@ impl CodexExecutor for FakeCodexExecutor {
     ) -> Result<CodexTurnResult> {
         if let Some(progress) = progress {
             for update in &self.progress_updates {
-                progress
-                    .update_recent_output(vec![update.clone()])
-                    .await?;
+                progress.update_recent_output(vec![update.clone()]).await?;
                 progress.commit_output(update.clone()).await?;
+            }
+            for message in &self.agent_messages {
+                progress.commit_agent_message(message.clone()).await?;
             }
         }
         self.wait_for_turn(active_turn).await
@@ -326,7 +345,11 @@ fn make_command_request_from(sender_id: i64, command: ControlCommand) -> Command
     }
 }
 
-fn make_group_command_request(sender_id: i64, group_id: i64, command: ControlCommand) -> CommandRequest {
+fn make_group_command_request(
+    sender_id: i64,
+    group_id: i64,
+    command: ControlCommand,
+) -> CommandRequest {
     CommandRequest {
         command,
         conversation_key: format!("group:{group_id}"),
@@ -406,8 +429,8 @@ fn spawn_bridge_sink(
                 ServiceCommand::FetchMessage {
                     respond_to, ..
                 } => {
-                    let _ = respond_to
-                        .send(Err(anyhow::anyhow!("FetchMessage stubbed out in tests")));
+                    let _ =
+                        respond_to.send(Err(anyhow::anyhow!("FetchMessage stubbed out in tests")));
                 },
                 ServiceCommand::FetchConversationHistory {
                     respond_to, ..
@@ -814,12 +837,9 @@ async fn approve_command_rejects_group_pending_task() {
     .expect("pending task appears");
 
     state
-        .send_control_command(make_command_request_from(
-            2_394_626_220,
-            ControlCommand::Approve {
-                task_id: pending.task_id.clone(),
-            },
-        ))
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Approve {
+            task_id: pending.task_id.clone(),
+        }))
         .await
         .expect("approve command");
 
@@ -896,13 +916,11 @@ async fn non_admin_or_wrong_emoji_reaction_does_not_approve_group_task() {
         .expect("pending task exists");
     assert_eq!(task.status, TaskStatus::PendingApproval);
     assert!(codex.ensure_thread_calls().await.is_empty());
-    assert!(
-        sent_messages
-            .lock()
-            .expect("messages")
-            .iter()
-            .all(|text| text != "REACTION:5201:282")
-    );
+    assert!(sent_messages
+        .lock()
+        .expect("messages")
+        .iter()
+        .all(|text| text != "REACTION:5201:282"));
 
     run_handle.abort();
     bridge_handle.abort();
@@ -1052,10 +1070,7 @@ async fn non_admin_task_in_trusted_group_bypasses_approval() {
             .any(|text| text.contains("待审批任务：")),
         "trusted-group tasks must not generate approval notices"
     );
-    assert_eq!(
-        codex.ensure_thread_calls().await,
-        vec![("group:778".to_string(), None)]
-    );
+    assert_eq!(codex.ensure_thread_calls().await, vec![("group:778".to_string(), None)]);
 
     run_handle.abort();
     bridge_handle.abort();
@@ -1133,13 +1148,9 @@ async fn non_admin_group_status_command_is_rejected() {
     wait_for_snapshot_prompt_file(&state).await;
 
     state
-        .send_control_command(make_group_command_request(
-            42,
-            777,
-            ControlCommand::Status {
-                task_id: None,
-            },
-        ))
+        .send_control_command(make_group_command_request(42, 777, ControlCommand::Status {
+            task_id: None,
+        }))
         .await
         .expect("status command");
 
@@ -1216,11 +1227,7 @@ async fn compact_command_without_binding_reports_missing_context() {
 
 #[tokio::test]
 async fn clear_command_removes_current_conversation_binding_and_next_turn_uses_new_thread() {
-    let codex = Arc::new(FakeCodexExecutor::with_reply(
-        vec!["thread-reset"],
-        "turn-reset",
-        "ok",
-    ));
+    let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-reset"], "turn-reset", "ok"));
     let (command_tx, command_rx) = mpsc::channel(16);
     let (control_tx, control_rx) = mpsc::channel(16);
     let state = ServiceState::with_control(command_tx, control_tx);
@@ -1248,11 +1255,7 @@ async fn clear_command_removes_current_conversation_binding_and_next_turn_uses_n
     wait_for_snapshot_prompt_file(&state).await;
 
     state
-        .send_control_command(make_group_command_request(
-            2_394_626_220,
-            777,
-            ControlCommand::Clear,
-        ))
+        .send_control_command(make_group_command_request(2_394_626_220, 777, ControlCommand::Clear))
         .await
         .expect("clear command");
 
@@ -1272,22 +1275,14 @@ async fn clear_command_removes_current_conversation_binding_and_next_turn_uses_n
     .await
     .expect("clear reply");
 
-    assert!(
-        store
-            .lock()
-            .await
-            .binding("group:777")
-            .expect("query cleared binding")
-            .is_none()
-    );
+    assert!(store
+        .lock()
+        .await
+        .binding("group:777")
+        .expect("query cleared binding")
+        .is_none());
 
-    state.publish_event(make_group_event_from(
-        2_394_626_220,
-        "admin",
-        777,
-        9101,
-        "清空后重新开始",
-    ));
+    state.publish_event(make_group_event_from(2_394_626_220, "admin", 777, 9101, "清空后重新开始"));
 
     timeout(Duration::from_secs(1), async {
         loop {
@@ -1395,13 +1390,7 @@ async fn compact_command_for_running_conversation_reports_busy() {
     ));
     wait_for_snapshot_prompt_file(&state).await;
 
-    state.publish_event(make_group_event_from(
-        2_394_626_220,
-        "admin",
-        777,
-        9201,
-        "执行中的群任务",
-    ));
+    state.publish_event(make_group_event_from(2_394_626_220, "admin", 777, 9201, "执行中的群任务"));
 
     timeout(Duration::from_secs(1), async {
         loop {
@@ -1645,6 +1634,63 @@ async fn admin_status_shows_recent_live_output_for_running_task() {
 }
 
 #[tokio::test]
+async fn runtime_task_sends_each_agent_message_without_missing_result_fallback() {
+    let codex = Arc::new(FakeCodexExecutor::with_agent_messages(
+        vec!["thread-agent-output"],
+        "turn-agent-output",
+        vec!["我先看一下。", "查完了，是配置问题。"],
+    ));
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (control_tx, control_rx) = mpsc::channel(16);
+    let state = ServiceState::with_control(command_tx, control_tx);
+    let sent_messages = Arc::new(StdMutex::new(Vec::new()));
+    let bridge_handle = spawn_bridge_sink(command_rx, sent_messages.clone());
+    let store = Arc::new(AsyncMutex::new(
+        StateStore::open_in_memory().expect("open in-memory state store"),
+    ));
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let run_handle = tokio::spawn(orchestrator::run(
+        state.clone(),
+        control_rx,
+        codex,
+        store,
+        runtime_config(tempdir.path()),
+    ));
+    wait_for_snapshot_prompt_file(&state).await;
+
+    state.publish_event(make_private_event_from(
+        2_394_626_220,
+        "admin",
+        8101,
+        "帮我看一下这个问题",
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let messages = sent_messages.lock().expect("messages").clone();
+            if messages.iter().any(|text| text == "我先看一下。")
+                && messages.iter().any(|text| text == "查完了，是配置问题。")
+            {
+                assert!(
+                    !messages
+                        .iter()
+                        .any(|text| text == &reply_formatter::format_missing_skill_reply()),
+                    "agent text output should count as a delivered reply"
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("agent messages delivered");
+
+    run_handle.abort();
+    bridge_handle.abort();
+}
+
+#[tokio::test]
 async fn duplicate_pending_approval_from_same_conversation_is_rejected() {
     let codex = Arc::new(FakeCodexExecutor::with_reply(vec!["thread-11"], "turn-11", "不会执行"));
     let (command_tx, command_rx) = mpsc::channel(16);
@@ -1760,9 +1806,8 @@ async fn pending_approval_expires_without_admin_reply() {
 
 #[tokio::test]
 async fn cancel_command_replies_gracefully_when_interrupt_fails() {
-    let codex = Arc::new(
-        FakeCodexExecutor::blocking(vec!["thread-x"], "turn-x").with_failing_interrupt(),
-    );
+    let codex =
+        Arc::new(FakeCodexExecutor::blocking(vec!["thread-x"], "turn-x").with_failing_interrupt());
     let (command_tx, command_rx) = mpsc::channel(16);
     let (control_tx, control_rx) = mpsc::channel(16);
     let state = ServiceState::with_control(command_tx, control_tx);
@@ -1780,7 +1825,8 @@ async fn cancel_command_replies_gracefully_when_interrupt_fails() {
     ));
     wait_for_snapshot_prompt_file(&state).await;
 
-    // publish an event that will become the running task (admin bypasses approval gate)
+    // publish an event that will become the running task (admin bypasses approval
+    // gate)
     state.publish_event(make_private_event_from(2_394_626_220, "admin", 9301, "长跑任务"));
 
     // wait until the task is running
@@ -1835,8 +1881,10 @@ async fn send_reply_best_effort_swallows_error_with_log() {
         }
     }
     // The function returns (), so absence of panic + no `?` == swallowed error.
-    codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, false, 1, "hi".into()).await;
-    codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, true, 2, "hi".into()).await;
+    codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, false, 1, "hi".into())
+        .await;
+    codex_bridge_core::orchestrator::send_reply_best_effort(&FailingSink, true, 2, "hi".into())
+        .await;
 }
 
 #[tokio::test]
@@ -1845,10 +1893,8 @@ async fn distinct_conversations_run_their_turns_concurrently() {
     // orchestrator still serialised tasks at the global level, the second
     // start_turn would never happen until the first finishes — so the second
     // ensure_thread_calls entry would never be observed within the timeout.
-    let codex = Arc::new(FakeCodexExecutor::blocking(
-        vec!["thread-priv", "thread-group"],
-        "turn-x",
-    ));
+    let codex =
+        Arc::new(FakeCodexExecutor::blocking(vec!["thread-priv", "thread-group"], "turn-x"));
     let (command_tx, command_rx) = mpsc::channel(16);
     let (control_tx, control_rx) = mpsc::channel(16);
     let state = ServiceState::with_control(command_tx, control_tx);
@@ -1869,13 +1915,7 @@ async fn distinct_conversations_run_their_turns_concurrently() {
     // Admin private chat — bypasses friend gate and approval.
     state.publish_event(make_private_event_from(2_394_626_220, "admin", 9401, "私聊长跑"));
     // Admin group chat — bypasses approval too.
-    state.publish_event(make_group_event_from(
-        2_394_626_220,
-        "admin",
-        7777,
-        9402,
-        "群里也长跑",
-    ));
+    state.publish_event(make_group_event_from(2_394_626_220, "admin", 7777, 9402, "群里也长跑"));
 
     timeout(Duration::from_secs(2), async {
         loop {
@@ -1900,10 +1940,8 @@ async fn distinct_conversations_run_their_turns_concurrently() {
 
 #[tokio::test]
 async fn runtime_pool_limit_queues_extra_conversations_until_a_slot_frees() {
-    let codex = Arc::new(FakeCodexExecutor::blocking(
-        vec!["thread-priv", "thread-group"],
-        "turn-x",
-    ));
+    let codex =
+        Arc::new(FakeCodexExecutor::blocking(vec!["thread-priv", "thread-group"], "turn-x"));
     let (command_tx, command_rx) = mpsc::channel(16);
     let (control_tx, control_rx) = mpsc::channel(16);
     let state = ServiceState::with_control(command_tx, control_tx);
@@ -1914,23 +1952,12 @@ async fn runtime_pool_limit_queues_extra_conversations_until_a_slot_frees() {
     let mut config = runtime_config(tempdir.path());
     config.runtime_pool_size = 1;
 
-    let run_handle = tokio::spawn(orchestrator::run(
-        state.clone(),
-        control_rx,
-        codex.clone(),
-        store,
-        config,
-    ));
+    let run_handle =
+        tokio::spawn(orchestrator::run(state.clone(), control_rx, codex.clone(), store, config));
     wait_for_snapshot_prompt_file(&state).await;
 
     state.publish_event(make_private_event_from(2_394_626_220, "admin", 9501, "私聊长跑"));
-    state.publish_event(make_group_event_from(
-        2_394_626_220,
-        "admin",
-        8888,
-        9502,
-        "群里排队",
-    ));
+    state.publish_event(make_group_event_from(2_394_626_220, "admin", 8888, 9502, "群里排队"));
 
     timeout(Duration::from_secs(2), async {
         loop {
@@ -1938,12 +1965,16 @@ async fn runtime_pool_limit_queues_extra_conversations_until_a_slot_frees() {
             let running_count = snapshot
                 .lanes
                 .iter()
-                .filter(|lane| lane.state == codex_bridge_core::lane_manager::LaneRuntimeState::Running)
+                .filter(|lane| {
+                    lane.state == codex_bridge_core::lane_manager::LaneRuntimeState::Running
+                })
                 .count();
             let queued_count = snapshot
                 .lanes
                 .iter()
-                .filter(|lane| lane.state == codex_bridge_core::lane_manager::LaneRuntimeState::Queued)
+                .filter(|lane| {
+                    lane.state == codex_bridge_core::lane_manager::LaneRuntimeState::Queued
+                })
                 .count();
             if running_count == 1 && queued_count == 1 && snapshot.ready_lane_count == 1 {
                 break;
@@ -1957,10 +1988,7 @@ async fn runtime_pool_limit_queues_extra_conversations_until_a_slot_frees() {
     assert_eq!(codex.ensure_thread_calls().await.len(), 1);
 
     state
-        .send_control_command(make_command_request_from(
-            2_394_626_220,
-            ControlCommand::Cancel,
-        ))
+        .send_control_command(make_command_request_from(2_394_626_220, ControlCommand::Cancel))
         .await
         .expect("cancel running lane");
 

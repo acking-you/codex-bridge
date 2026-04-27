@@ -71,11 +71,14 @@ fn bridge_protocol_covers_turn_checklist_reply_and_permissions() {
     assert!(BRIDGE_PROTOCOL_TEXT.contains("Gate 1"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains("reply-current"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains(".run/artifacts/"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("gpt2api-image-generator"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("/v1/images/generations"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("/v1/images/edits"));
+    assert!(BRIDGE_PROTOCOL_TEXT.contains("Do not use session APIs"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains("inspect the host machine broadly"));
     assert!(BRIDGE_PROTOCOL_TEXT.contains("must never delete files"));
-    assert!(BRIDGE_PROTOCOL_TEXT.contains(
-        "Never write the literal two-character sequence \\n when you want a line break"
-    ));
+    assert!(BRIDGE_PROTOCOL_TEXT
+        .contains("Never write the literal two-character sequence \\n when you want a line break"));
 }
 
 #[test]
@@ -89,16 +92,16 @@ fn load_persona_rejects_empty_file() {
 }
 
 #[test]
-fn extract_final_reply_prefers_last_agent_message() {
+fn extract_final_reply_includes_all_agent_messages_from_turn() {
     let items = vec![
         json!({"type":"assistantMessage","text":"first"}),
-        json!({"item":{"type":"assistant","text":"ignored"}}),
+        json!({"item":{"type":"assistant","text":"second"}}),
         json!({"type":"assistantMessage","text":""}),
         json!({"type":"reasoning","text":"not final"}),
-        json!({"item":{"type":"agentMessage","text":"last-valid"}}),
+        json!({"item":{"type":"agentMessage","text":"third"}}),
     ];
 
-    assert_eq!(extract_final_reply(&items), Some("last-valid".to_string()));
+    assert_eq!(extract_final_reply(&items), Some("first\n\nsecond\n\nthird".to_string()));
 }
 
 #[test]
@@ -210,8 +213,8 @@ fn thread_resume_params_reapply_current_system_prompt() {
     fs::write(&persona_file, "# Persona\n\nprompt from runtime file").expect("write persona");
     let mut config = runtime_config();
     config.prompt_file = persona_file;
-    let params = build_thread_resume_params(&config, "thread-1", "group:42")
-        .expect("build resume params");
+    let params =
+        build_thread_resume_params(&config, "thread-1", "group:42").expect("build resume params");
 
     assert_eq!(params.thread_id, "thread-1");
     assert_eq!(params.cwd, Some("/tmp/codex-bridge".to_string()));
@@ -299,10 +302,8 @@ fn command_approval_declines_extra_permission_requests() {
         network_approval_context: None,
         command: Some("ls -la".to_string()),
         cwd: Some(
-            AbsolutePathBuf::from_absolute_path(
-                "/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ",
-            )
-            .expect("absolute path"),
+            AbsolutePathBuf::from_absolute_path("/home/ts_user/llm_pro/codex-bridge/deps/NapCatQQ")
+                .expect("absolute path"),
         ),
         command_actions: None,
         additional_permissions: Some(codex_app_server_protocol::AdditionalPermissionProfile {
